@@ -31,9 +31,8 @@ extraResources:
   # because NSIS installers cannot exceed ~2 GB.
   - from: ../../resources/models/bge-m3
     to: models/bge-m3
-  # bundled python-build-standalone, fetched per platform by scripts/fetch-python.mjs
-  - from: ../../resources/python/${platform}-${arch}
-    to: python/runtime
+# bundled python-build-standalone, fetched per platform by scripts/fetch-python.mjs.
+# Paths are spelled out per target because ${platform} resolves to the build host when cross-building.
 publish:
   provider: github
   owner: adamsmith988
@@ -48,6 +47,9 @@ linux:
   executableName: rlm-ide
   synopsis: Local-first AI coding IDE
   maintainer: adamsmith988 <275477346+adamsmith988@users.noreply.github.com>
+  extraResources:
+    - from: ../../resources/python/linux-x64
+      to: python/runtime
 deb:
   packageName: rlm-ide
   artifactName: rlm-ide_${version}_${arch}.${ext}
@@ -58,6 +60,9 @@ win:
     - target: nsis
       arch: [x64]
   icon: ../../resources/icons/icon.ico
+  extraResources:
+    - from: ../../resources/python/win32-x64
+      to: python/runtime
   # Code signing: set CSC_LINK / CSC_KEY_PASSWORD (or WIN_CSC_LINK) in CI. Unsigned builds trigger SmartScreen.
 nsis:
   oneClick: false

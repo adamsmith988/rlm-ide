@@ -17,7 +17,7 @@ Download the AppImage, the `.deb` or the Windows installer from
 [Releases](https://github.com/adamsmith988/rlm-ide/releases).
 
 ```bash
-chmod +x "RLM IDE-0.1.0.AppImage" && ./"RLM IDE-0.1.0.AppImage"
+chmod +x RLM-IDE-0.1.0.AppImage && ./RLM-IDE-0.1.0.AppImage
 # or
 sudo apt install ./rlm-ide_0.1.0_amd64.deb
 ```
