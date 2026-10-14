@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "pi",
+  "name": "Pi Coding Agent",
+  "version": "0.85.1",
+  "kind": "coding_agent",
+  "description": "Fixture only — Earendil Pi RPC coding harness (not implemented yet).",
+  "lifecycle": "session",
+  "runtime": {
+    "kind": "subprocess",
+    "wire": "jsonl_rpc"
+  },
+  "memory": ["session"],
+  "capabilities": [
+    "stream",
+    "builtin_tools",
+    "code_exec",
+    "jsonl_rpc",
+    "compaction",
+    "trajectory_export"
+  ],
+  "operations": ["create", "run", "continue", "status", "shutdown", "events"],
+  "depends_on": [],
+  "host_ports": [
+    { "id": "process.spawn", "required": true },
+    { "id": "events", "required": false },
+    { "id": "chat", "required": false }
+  ],
+  "artifacts": ["session_jsonl"],
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "cwd": { "type": "string" },
+      "model": { "type": "string" }
+    }
+  },
+  "input_schema": { "type": "object", "additionalProperties": true },
+  "output_schema": { "type": "object", "additionalProperties": true },
+  "extensions": { "fixture_only": true }
+}

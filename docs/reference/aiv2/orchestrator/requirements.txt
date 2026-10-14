@@ -1,0 +1,30 @@
+# Orchestrator service — Python 3.11+
+# Install: pip install -r requirements.txt
+
+# --- API & config ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+typing_extensions>=4.9.0
+
+# --- Agent graph (LangGraph + LangChain message types) ---
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# --- OpenAI-compatible client (llm-gateway) ---
+openai>=1.6.0
+
+# --- Markdown session rules (YAML frontmatter + globstar) ---
+pyyaml>=6.0.1
+wcmatch>=8.5
+
+# --- Logging & resilience ---
+structlog>=23.2.0
+tenacity>=8.2.0
+
+# Semantic similarity (sentence-transformers + torch) is optional — see requirements-semantic.txt.
+# Omitting it keeps the image small and avoids huge NVIDIA wheels that often trigger ``docker save``
+# checksum errors on flaky Docker storage.

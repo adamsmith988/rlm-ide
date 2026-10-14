@@ -1,0 +1,45 @@
+{
+  "_doc": "Turn-intent vocabulary and how each intent maps onto tool.json metadata (category / capabilities). No tool ids: tools are matched by what their tool.json declares. Loaded by src/tools/tool_intents.py; override the path with TOOL_INTENTS_FILE.",
+  "markers": {
+    "graph": ["graph search", "graph_search", "سرچ گراف", "جستجوی گراف", "گراف دانش", "knowledge graph", "neo4j", "گراف", "شبکه روابط", "رابطه بین"],
+    "attach": [
+      "پرونده", "نام پرونده", "چه نام", "چه اسمی", "نام دارد", "نامش چی", "case name",
+      "database", "storage", "دیتابیس", "case file", "case_id", "توی دیتابیس", "در دیتابیس", "در storage", "from storage", "exists in", "وجود داره", "وجود دارد",
+      "attach", "import", "اضافه کن", "وصل کن", "attach کن"
+    ],
+    "list": ["list files", "what files", "which files", "فایل‌های سشن", "لیست فایل", "چه فایل", "فایل‌ها رو نشون"],
+    "search": ["search", "grep", "find in", "جستجو", "سرچ", "پیدا کن در", "بگرد", "کجا گفته", "where is", "contains"]
+  },
+  "search_unless_regex": "\\b(?:بخون|read|خط\\s*\\d+)\\b",
+  "session_tools": {
+    "_doc": "Workspace (input_types: session) tools offered per intent, matched by tool.json capabilities. An intent missing here offers every session tool.",
+    "graph": [],
+    "read": ["file_read", "file_listing"],
+    "search": ["text_search"],
+    "discover": ["text_search", "storage_lookup"],
+    "attach": ["storage_lookup"],
+    "list": ["file_listing"]
+  },
+  "session_tools_min_files": {
+    "_doc": "Session tools with these capabilities are only offered for the intent once the chat has at least N files.",
+    "read": {"file_listing": 2},
+    "search": {"file_listing": 1}
+  },
+  "graph_tools": {"categories": ["graph"]},
+  "discover_tools": {"capabilities": ["semantic_search", "text_retrieval", "search"]},
+  "mention_gated": {
+    "_doc": "Tools only offered on file/session intents when the user mentions them; matched by tool.json category or capability.",
+    "groups": [
+      {"categories": ["graph"], "mentions": ["graph", "گراف", "neo4j", "رابطه", "شبکه"]},
+      {"categories": ["face"], "mentions": ["face", "چهره", "recogni"]},
+      {"capabilities": ["similarity_search"], "mentions": ["similar image", "شبیه", "image search"]},
+      {"capabilities": ["entity_enrichment"], "mentions": []}
+    ]
+  },
+  "graph_query_stopwords": [
+    "از", "استفاده", "کن", "بکن", "the", "use", "graph", "search", "گراف", "سرچ", "جستجو", "جستجوی", "انجام", "بده",
+    "توی", "در", "دیتابیس", "database", "please", "لطفا", "فایل", "را", "رو", "برای", "که", "این", "آن", "پیدا", "نشون",
+    "file", "find", "with", "using"
+  ],
+  "graph_query_meaningless": ["جستجو", "جستجوی", "گراف", "graph", "search", "انجام", "بکن", "کن", "توی", "در", "دیتابیس", "database", "the", "a", "an"]
+}

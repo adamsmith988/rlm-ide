@@ -1,0 +1,9 @@
+{
+  "name": "@rlm/evals",
+  "private": true,
+  "type": "module",
+  "description": "Dogfood evals: drive the built RLM IDE through its UI, score what it builds.",
+  "scripts": {
+    "eval": "node run.mjs"
+  }
+}

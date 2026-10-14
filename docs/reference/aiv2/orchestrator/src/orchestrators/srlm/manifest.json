@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "srlm",
+  "name": "SelfReflect (SRLM)",
+  "version": "1.0.0",
+  "kind": "search_controller",
+  "description": "SelfReflect controller (Kirchhof et al., 2025): sample K answers from the model (or from any registered chat engine), feed them back, and summarize the model's answer distribution — main possibility, alternatives and their relative likelihood.",
+  "lifecycle": "one_shot",
+  "runtime": { "kind": "controller", "wire": "python_api" },
+  "memory": ["session", "external"],
+  "capabilities": ["stream", "ensemble_search", "tools"],
+  "operations": ["create", "run", "search", "select", "status", "shutdown", "events"],
+  "depends_on": [],
+  "host_ports": [
+    { "id": "chat", "required": true },
+    { "id": "events", "required": false }
+  ],
+  "session_binding": {
+    "mode": "ephemeral_turn",
+    "key_from": "chat_session_id",
+    "first_op": "run",
+    "next_op": "run",
+    "stores": ["session", "external"]
+  },
+  "artifacts": [],
+  "resource": { "weight": 4, "max_parallel": 4 },
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "question": { "type": "string" },
+      "context_messages": { "type": "array" }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "text": { "type": "string" },
+      "samples": { "type": "array" },
+      "distribution": { "type": "object" }
+    }
+  },
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "num_samples": { "type": "integer", "minimum": 1 },
+      "sample_temperature": { "type": "number" },
+      "sample_max_tokens": { "type": "integer", "minimum": 0 },
+      "summary_strategy": {
+        "type": "string",
+        "enum": ["sample_and_summarize", "greedy", "basic", "cot", "twostep_cot", "concatenated_answers"]
+      },
+      "summary_temperature": { "type": "number" },
+      "summary_max_tokens": { "type": "integer", "minimum": 0 },
+      "enable_thinking_for_summaries": { "type": "boolean" },
+      "thinking_sampling": { "type": "object" },
+      "peer_engine": { "type": "string" },
+      "peer_config": { "type": "object" },
+      "max_parallel": { "type": "integer", "minimum": 1 },
+      "history_turns": { "type": "integer", "minimum": 0 },
+      "sample_timeout_sec": { "type": "integer", "minimum": 0 },
+      "show_samples": { "type": "boolean" },
+      "host_context_blocks": { "type": "string" }
+    }
+  },
+  "settings_ui": [
+    {
+      "name": "summary_strategy",
+      "type": "combo",
+      "label": "Summary strategy",
+      "label_fa": "راهبرد خلاصه‌سازی",
+      "default": "sample_and_summarize",
+      "options": [
+        { "value": "sample_and_summarize", "label": "Sample & summarize (paper's best)", "label_fa": "نمونه‌برداری و خلاصه" },
+        { "value": "greedy", "label": "Greedy answer (baseline)", "label_fa": "پاسخ greedy" },
+        { "value": "basic", "label": "Basic summary prompt", "label_fa": "خلاصهٔ ساده" },
+        { "value": "cot", "label": "Chain-of-thought summary", "label_fa": "خلاصه با زنجیرهٔ فکر" },
+        { "value": "twostep_cot", "label": "Two-step CoT", "label_fa": "CoT دومرحله‌ای" },
+        { "value": "concatenated_answers", "label": "Concatenated samples", "label_fa": "نمونه‌های الحاق‌شده" }
+      ]
+    },
+    {
+      "name": "num_samples",
+      "type": "int",
+      "label": "Sampled answers (K)",
+      "label_fa": "تعداد نمونه‌ها (K)",
+      "default": 10,
+      "min": 1,
+      "max": 50,
+      "step": 1
+    },
+    {
+      "name": "sample_temperature",
+      "type": "float",
+      "label": "Sampling temperature",
+      "label_fa": "دمای نمونه‌برداری",
+      "default": 1.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.05,
+      "advanced": true
+    },
+    {
+      "name": "sample_max_tokens",
+      "type": "int",
+      "label": "Max tokens per sample (0 = model default)",
+      "label_fa": "سقف توکن هر نمونه",
+      "default": 4096,
+      "min": 0,
+      "advanced": true
+    },
+    {
+      "name": "summary_temperature",
+      "type": "float",
+      "label": "Summary temperature",
+      "label_fa": "دمای خلاصه",
+      "default": 0.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.05,
+      "advanced": true
+    },
+    {
+      "name": "summary_max_tokens",
+      "type": "int",
+      "label": "Max summary tokens (0 = model default)",
+      "label_fa": "سقف توکن خلاصه",
+      "default": 4096,
+      "min": 0,
+      "advanced": true
+    },
+    {
+      "name": "enable_thinking_for_summaries",
+      "type": "boolean",
+      "label": "Model thinking for basic / sample-and-summarize",
+      "label_fa": "فکر مدل هنگام خلاصه",
+      "default": false,
+      "advanced": true
+    },
+    {
+      "name": "thinking_sampling",
+      "type": "json",
+      "label": "Sampling when thinking is on",
+      "label_fa": "پارامترهای نمونه‌برداری در حالت فکر",
+      "default": { "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0 },
+      "advanced": true
+    },
+    {
+      "name": "peer_engine",
+      "type": "string",
+      "label": "Peer engine id (empty = sample the model directly)",
+      "label_fa": "موتور نمونه‌ها (خالی = مستقیم از مدل)",
+      "default": "",
+      "options_source": "orchestrators?capability=stream",
+      "advanced": true
+    },
+    {
+      "name": "peer_config",
+      "type": "json",
+      "label": "Peer engine settings",
+      "label_fa": "تنظیمات موتور نمونه‌ها",
+      "default": {},
+      "advanced": true,
+      "disabled_when": { "field": "peer_engine", "equals": "" }
+    },
+    {
+      "name": "max_parallel",
+      "type": "int",
+      "label": "Samples in parallel",
+      "label_fa": "نمونه‌های هم‌زمان",
+      "default": 4,
+      "min": 1,
+      "max": 32,
+      "advanced": true
+    },
+    {
+      "name": "history_turns",
+      "type": "int",
+      "label": "Chat turns given as context",
+      "label_fa": "تعداد نوبت‌های قبلی به‌عنوان زمینه",
+      "default": 6,
+      "min": 0,
+      "max": 50,
+      "advanced": true
+    },
+    {
+      "name": "host_context_blocks",
+      "type": "string",
+      "label": "Host context in direct sampling (comma-separated block names, * = all, empty = none)",
+      "label_fa": "زمینهٔ میزبان در نمونه‌گیری مستقیم (نام بلوک‌ها با کاما، * = همه، خالی = هیچ)",
+      "default": "*",
+      "advanced": true
+    },
+    {
+      "name": "sample_timeout_sec",
+      "type": "int",
+      "label": "Timeout per sample (sec, 0 = none)",
+      "label_fa": "مهلت هر نمونه (ثانیه)",
+      "default": 600,
+      "min": 0,
+      "advanced": true
+    },
+    {
+      "name": "show_samples",
+      "type": "boolean",
+      "label": "Show sampled answers in the process log",
+      "label_fa": "نمایش نمونه‌ها در لاگ فرایند",
+      "default": true,
+      "advanced": true
+    }
+  ],
+  "extensions": {
+    "chat_stream": true,
+    "stream_entry": "src.orchestrators.srlm.chat_stream:stream_agent_srlm",
+    "wraps_engines": true,
+    "reference": {
+      "paper": "https://arxiv.org/abs/2505.20295",
+      "code": "https://github.com/apple-aiml-research/ml-selfreflect"
+    }
+  }
+}

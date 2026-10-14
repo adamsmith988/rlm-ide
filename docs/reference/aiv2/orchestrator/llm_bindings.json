@@ -1,0 +1,37 @@
+{
+  "service_id": "orchestrator",
+  "bindings": [
+    {
+      "slot": "chat",
+      "api": "chat",
+      "input_modalities": ["text"],
+      "output_modalities": ["text"],
+      "label_fa": "مدل گفتگو",
+      "required": true
+    },
+    {
+      "slot": "embed",
+      "api": "embed",
+      "input_modalities": ["text"],
+      "output_modalities": ["embedding"],
+      "label_fa": "مدل امبدینگ حافظه",
+      "required": true
+    },
+    {
+      "slot": "rag_embed",
+      "api": "embed",
+      "input_modalities": ["text"],
+      "output_modalities": ["embedding"],
+      "label_fa": "مدل امبدینگ RAG",
+      "required": true
+    },
+    {
+      "slot": "rag_rerank",
+      "api": "rerank",
+      "input_modalities": ["text"],
+      "output_modalities": ["text"],
+      "label_fa": "مدل ریرنک RAG",
+      "required": false
+    }
+  ]
+}

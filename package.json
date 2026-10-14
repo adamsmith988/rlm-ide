@@ -1,0 +1,43 @@
+{
+  "name": "rlm-ide-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "RLM IDE: a local-first Electron coding IDE powered by the RLM engine",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @rlm/desktop dev",
+    "dev:nosandbox": "pnpm --filter @rlm/desktop dev -- --noSandbox",
+    "build": "pnpm --filter @rlm/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:py": "python3 -m pytest python/rlm_worker/tests -q",
+    "lint": "eslint .",
+    "fetch:models": "node scripts/fetch-models.mjs",
+    "fetch:python": "node scripts/fetch-python.mjs",
+    "dist:linux": "pnpm --filter @rlm/desktop dist:linux",
+    "dist:win": "pnpm --filter @rlm/desktop dist:win",
+    "eval": "pnpm --filter @rlm/evals run eval"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "pnpm": {
+    "overrides": {
+      "cpu-features": "-"
+    },
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "esbuild",
+      "node-pty",
+      "onnxruntime-node",
+      "protobufjs",
+      "sharp"
+    ]
+  }
+}

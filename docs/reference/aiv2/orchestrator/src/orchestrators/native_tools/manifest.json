@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "native_tools",
+  "name": "Native Tools",
+  "version": "1.0.0",
+  "kind": "chat_engine",
+  "description": "OpenAI-native tool_calls chat engine (default hub chat).",
+  "lifecycle": "session",
+  "runtime": { "kind": "in_process", "wire": "python_api" },
+  "memory": ["session", "external"],
+  "capabilities": ["stream", "tools", "compaction"],
+  "operations": ["create", "run", "continue", "status", "shutdown", "events"],
+  "depends_on": [],
+  "host_ports": [
+    { "id": "chat", "required": true },
+    { "id": "tools", "required": true },
+    { "id": "events", "required": false }
+  ],
+  "tools_binding": {
+    "mode": "openai_functions",
+    "config_key": "tool_ids",
+    "host_port": "tools",
+    "selection": "host_turn"
+  },
+  "session_binding": {
+    "mode": "ephemeral_turn",
+    "key_from": "chat_session_id",
+    "first_op": "run",
+    "next_op": "run",
+    "stores": ["session", "external"]
+  },
+  "artifacts": [],
+  "input_schema": { "type": "object", "additionalProperties": true },
+  "output_schema": { "type": "object", "additionalProperties": true },
+  "config_schema": { "type": "object", "additionalProperties": true },
+  "settings_ui": [
+    {
+      "name": "self_compact_enabled",
+      "type": "combo",
+      "label": "SelfCompact context compaction",
+      "label_fa": "فشرده‌سازی خودکار زمینه (SelfCompact)",
+      "default": "",
+      "options": [
+        { "value": "", "label": "Server default", "label_fa": "پیش‌فرض سرور" },
+        { "value": "true", "label": "On", "label_fa": "روشن" },
+        { "value": "false", "label": "Off (legacy prune)", "label_fa": "خاموش (حذف قدیمی)" }
+      ]
+    },
+    {
+      "name": "self_compact_rubric",
+      "type": "combo",
+      "label": "Compaction rubric",
+      "label_fa": "معیار فشرده‌سازی",
+      "default": "",
+      "options": [
+        { "value": "", "label": "Server default", "label_fa": "پیش‌فرض سرور" },
+        { "value": "chat", "label": "Chat (search rubric, keeps all stated facts)", "label_fa": "گفتگو" },
+        { "value": "search", "label": "Agentic search (paper, verbatim)", "label_fa": "جستجوی عاملی" },
+        { "value": "math", "label": "Math reasoning (paper, verbatim)", "label_fa": "استدلال ریاضی" }
+      ],
+      "advanced": true
+    },
+    { "name": "self_compact_probe_period", "type": "int", "label": "Rounds between rubric probes (empty = server default)", "label_fa": "فاصلهٔ پرسش معیار", "default": null, "min": 1, "max": 50, "advanced": true },
+    { "name": "self_compact_min_rounds", "type": "int", "label": "Min rounds before probing (empty = server default)", "label_fa": "حداقل دور قبل از پرسش", "default": null, "min": 0, "max": 100, "advanced": true },
+    { "name": "self_compact_probe_min_ratio", "type": "float", "label": "Probe when context ≥ fraction of window (empty = server default)", "label_fa": "آستانهٔ پرسش (کسر پنجره)", "default": null, "min": 0.0, "max": 1.0, "step": 0.05, "advanced": true },
+    { "name": "self_compact_backstop_ratio", "type": "float", "label": "Force compaction at fraction of window (empty = server default)", "label_fa": "فشرده‌سازی اجباری (کسر پنجره)", "default": null, "min": 0.05, "max": 1.0, "step": 0.05, "advanced": true },
+    { "name": "self_compact_max_rubric_per_turn", "type": "int", "label": "Rubric compactions per turn (empty = server default)", "label_fa": "حداکثر فشرده‌سازی در هر نوبت", "default": null, "min": 0, "max": 20, "advanced": true },
+    { "name": "self_compact_summary_max_tokens", "type": "int", "label": "Summary max tokens (empty = server default)", "label_fa": "حداکثر توکن خلاصه", "default": null, "min": 128, "max": 16384, "advanced": true },
+    { "name": "self_compact_max_overflow_retries", "type": "int", "label": "Compact-and-retry on overflow (empty = server default)", "label_fa": "تلاش مجدد پس از سرریز", "default": null, "min": 0, "max": 5, "advanced": true }
+  ],
+  "extensions": {
+    "chat_stream": true,
+    "module": "src.graph.native_tools_engine",
+    "stream_entry": "src.graph.native_tools_engine:stream_agent_native"
+  }
+}

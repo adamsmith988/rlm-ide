@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' rlm-model:; connect-src 'self' rlm-model: blob: data:; worker-src 'self' blob: rlm-model:"
+    />
+    <title>RLM inference</title>
+  </head>
+  <body>
+    <script type="module" src="./inference/main.ts"></script>
+  </body>
+</html>

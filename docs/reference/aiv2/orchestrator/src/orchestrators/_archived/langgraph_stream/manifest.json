@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "langgraph_stream",
+  "name": "LangGraph Stream",
+  "version": "1.0.0",
+  "kind": "chat_engine",
+  "description": "Legacy LangGraph ReAct streaming chat engine.",
+  "lifecycle": "session",
+  "runtime": { "kind": "in_process", "wire": "python_api" },
+  "memory": ["session", "external"],
+  "capabilities": ["stream", "tools"],
+  "operations": ["create", "run", "continue", "status", "shutdown", "events"],
+  "depends_on": [],
+  "host_ports": [
+    { "id": "chat", "required": true },
+    { "id": "tools", "required": true }
+  ],
+  "artifacts": [],
+  "input_schema": { "type": "object", "additionalProperties": true },
+  "output_schema": { "type": "object", "additionalProperties": true },
+  "config_schema": { "type": "object", "additionalProperties": true },
+  "settings_ui": [],
+  "extensions": { "chat_stream": true, "module": "src.graph.streaming" }
+}

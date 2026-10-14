@@ -1,0 +1,33 @@
+# FastAPI
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Settings
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# PostgreSQL
+asyncpg>=0.29.0
+
+# MongoDB
+motor>=3.3.0
+pymongo>=4.6.0
+
+# Qdrant Vector DB
+qdrant-client>=1.7.0
+
+# Neo4j Graph DB
+neo4j>=5.0.0
+
+# MinIO S3-compatible storage
+minio>=7.2.0
+
+# Utilities
+httpx>=0.25.0
+
+# Image processing (UX-009 thumbnails, UX-010 metadata)
+Pillow>=10.0.0
+
+# PDF preview (UX-012)
+PyMuPDF>=1.23.0

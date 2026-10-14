@@ -1,0 +1,4 @@
+# Optional: semantic file-reference hints (pulls PyTorch — large; not needed for core orchestration).
+# Install in image:  RUN pip install --no-cache-dir -r requirements-semantic.txt
+sentence-transformers>=2.2.0
+numpy>=1.26.0,<3

@@ -1,0 +1,31 @@
+node_modules/
+out/
+dist/
+release/
+.vite/
+coverage/
+*.log
+.DS_Store
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# build-time downloads (large)
+resources/python/
+resources/models/
+evals/results/
+evals/workspaces/
+evals/.runtimes/
+
+# secrets and weights
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.safetensors
+*.gguf
+*.onnx
+*.onnx_data
+.venv/
+venv/

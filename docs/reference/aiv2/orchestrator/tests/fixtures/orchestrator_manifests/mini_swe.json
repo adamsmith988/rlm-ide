@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "mini_swe",
+  "name": "mini-SWE-agent",
+  "version": "1.0.0",
+  "kind": "coding_agent",
+  "description": "Fixture only — SWE-agent mini bash-only harness (not implemented yet).",
+  "lifecycle": "one_shot",
+  "runtime": {
+    "kind": "in_process",
+    "wire": "python_api"
+  },
+  "memory": ["session"],
+  "capabilities": [
+    "bash_only",
+    "subprocess_actions",
+    "trajectory_export",
+    "code_exec"
+  ],
+  "operations": ["create", "run", "status", "shutdown"],
+  "depends_on": [],
+  "host_ports": [
+    { "id": "chat", "required": true },
+    { "id": "environment", "required": true }
+  ],
+  "artifacts": ["trajectory", "patch"],
+  "resource": {
+    "timeout_sec": 3600
+  },
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "cost_limit": { "type": "number" },
+      "mode": { "type": "string" }
+    }
+  },
+  "input_schema": { "type": "object", "additionalProperties": true },
+  "output_schema": { "type": "object", "additionalProperties": true },
+  "extensions": { "fixture_only": true }
+}

@@ -1,0 +1,69 @@
+appId: dev.rlmide.app
+productName: RLM IDE
+copyright: Copyright © RLM IDE
+directories:
+  output: release/${version}
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+asarUnpack:
+  - "**/node_modules/node-pty/**"
+  - "**/node_modules/sqlite-vec*/**"
+  - "**/node_modules/onnxruntime-node/**"
+  - "**/node_modules/@huggingface/transformers/**"
+  - "**/node_modules/sharp/**"
+  - "**/node_modules/@img/**"
+  - "**/node_modules/onnxruntime-web/dist/**"
+extraResources:
+  - from: ../../prompts
+    to: prompts
+  - from: ../../python/rlm_worker
+    to: python/rlm_worker
+    filter: ["*.py"]
+  - from: ../../python/rlm_hub
+    to: python/rlm_hub
+    filter: ["*.py"]
+  - from: ../../resources/models.manifest.json
+    to: models.manifest.json
+  # bundled embedder (bge-m3). FrogNano (2.4 GB) is installed by the Model Manager on first run,
+  # because NSIS installers cannot exceed ~2 GB.
+  - from: ../../resources/models/bge-m3
+    to: models/bge-m3
+  # bundled python-build-standalone, fetched per platform by scripts/fetch-python.mjs
+  - from: ../../resources/python/${platform}-${arch}
+    to: python/runtime
+publish:
+  provider: github
+  owner: adamsmith988
+  repo: rlm-ide
+  releaseType: release
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  icon: ../../resources/icons
+  executableName: rlm-ide
+  synopsis: Local-first AI coding IDE
+  maintainer: adamsmith988 <275477346+adamsmith988@users.noreply.github.com>
+deb:
+  packageName: rlm-ide
+  artifactName: rlm-ide_${version}_${arch}.${ext}
+  depends: ["libnss3", "libgtk-3-0", "libxss1", "libasound2t64 | libasound2"]
+  recommends: ["bubblewrap", "git"]
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: ../../resources/icons/icon.ico
+  # Code signing: set CSC_LINK / CSC_KEY_PASSWORD (or WIN_CSC_LINK) in CI. Unsigned builds trigger SmartScreen.
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false

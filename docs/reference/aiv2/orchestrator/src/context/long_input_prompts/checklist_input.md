@@ -1,0 +1,7 @@
+Beginning:
+{head}
+
+[…]
+
+End:
+{tail}

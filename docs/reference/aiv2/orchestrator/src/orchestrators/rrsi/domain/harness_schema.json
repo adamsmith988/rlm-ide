@@ -1,0 +1,90 @@
+{
+  "description": "The evolvable harness of the hub-chat domain: everything RRSI may change about how the frozen policy engine is driven. Each field belongs to exactly one component of K.",
+  "fields": {
+    "instructions": {
+      "component": "prompt",
+      "type": "string",
+      "max_chars": 4000,
+      "default": "",
+      "description": "General working instructions appended to the policy engine's system prompt."
+    },
+    "output_contract": {
+      "component": "output_plumbing",
+      "type": "string",
+      "max_chars": 1500,
+      "default": "",
+      "description": "How the final answer must be shaped (structure, language, citation of tool evidence, length)."
+    },
+    "engine_config": {
+      "component": "config",
+      "type": "object",
+      "default": {},
+      "description": "Settings of the policy engine. Only keys the policy engine declares in its manifest are accepted; frozen keys are refused."
+    },
+    "max_steps": {
+      "component": "control_flow",
+      "type": "integer",
+      "min": 1,
+      "max": 64,
+      "default": null,
+      "description": "Step budget of the policy engine for one turn (null = host default)."
+    },
+    "retry_on_failure": {
+      "component": "control_flow",
+      "type": "boolean",
+      "default": false,
+      "description": "Run the policy turn once more when it errors or returns an empty answer (bounded: one retry)."
+    },
+    "history_turns": {
+      "component": "context_mgmt",
+      "type": "integer",
+      "min": 0,
+      "max": 50,
+      "default": null,
+      "description": "How many previous user/assistant exchanges the policy engine sees (null = all the host provides)."
+    },
+    "tool_ids": {
+      "component": "client_tool",
+      "type": "array",
+      "items": "string",
+      "max_items": 32,
+      "default": [],
+      "description": "Allowlist of catalog tool ids exposed to the policy engine (empty = host's per-turn selection). Unknown ids are refused."
+    },
+    "skills": {
+      "component": "skill",
+      "type": "array",
+      "items": "object",
+      "item_keys": ["name", "when", "procedure"],
+      "max_items": 8,
+      "max_chars_each": 1200,
+      "default": [],
+      "description": "Reusable, entity-free procedures injected into the policy prompt with the condition under which each applies."
+    },
+    "memory": {
+      "component": "memory",
+      "type": "array",
+      "items": "string",
+      "max_items": 12,
+      "max_chars_each": 400,
+      "default": [],
+      "description": "Entity-free working notes persisted across turns of this chat and injected into the policy prompt."
+    },
+    "subagent_review": {
+      "component": "subagent",
+      "type": "object",
+      "item_keys": ["enabled", "instructions"],
+      "default": { "enabled": false, "instructions": "" },
+      "description": "A bounded reviewer pass: a separate model call critiques the policy's draft answer once and returns a revised final answer."
+    }
+  },
+  "prompt_block": {
+    "header": "## Harness guidance (evolved for this conversation)",
+    "sections": {
+      "instructions": "### Working instructions",
+      "skills": "### Skills (apply when the condition holds)",
+      "memory": "### Working notes",
+      "output_contract": "### Output requirements"
+    }
+  }
+}

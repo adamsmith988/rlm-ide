@@ -1,0 +1,15 @@
+{
+  "_doc": "Prompt wording for page-aware chat (src/host_context.py): USER MENTIONS guidance and the HOST PAGE CONTEXT block. Describe the action; the model picks the tool from the tool descriptions it was given.",
+  "page_header": "HOST PAGE CONTEXT",
+  "page_guidance": [
+    "This is what the user sees on the page right now, as of their latest message.",
+    "When the user refers to the page, the current view or what they have selected, use these values; they replace any page state mentioned earlier in the conversation."
+  ],
+  "header": "USER MENTIONS (structured — prefer these exact ids; do not guess by filename alone)",
+  "file": "  → If it is not in the chat workspace yet, attach it to the workspace with this artifact_id.",
+  "case_with_outputs": "  → The host loads these into the session data pool / capped file registry (read them from the workspace; do not re-fetch the whole case).",
+  "case_without_outputs": [
+    "  → For meaning search inside this case, use a semantic search scoped to this case_id.",
+    "  → To bring a case file into the chat, attach it with this case_id plus the filename or artifact_id."
+  ]
+}

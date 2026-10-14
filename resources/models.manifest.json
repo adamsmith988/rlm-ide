@@ -1,0 +1,86 @@
+{
+  "builtin:frognano-4b": {
+    "repo": "RASMUS/FrogNano-4B-2609-ONNX",
+    "revision": "429642b7804303ab568efbaead4f7944db79255b",
+    "dir": "frognano-4b",
+    "files": [
+      {
+        "path": "chat_template.jinja",
+        "size": 7756,
+        "sha256": null
+      },
+      {
+        "path": "config.json",
+        "size": 2021,
+        "sha256": null
+      },
+      {
+        "path": "generation_config.json",
+        "size": 77,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 12807982,
+        "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 15141,
+        "sha256": null
+      },
+      {
+        "path": "onnx/model_q4f16.onnx",
+        "size": 655272,
+        "sha256": "2c637dcef2b99d094a4b2d94c8becb836618d04a194e15aff43dbdee5d908688"
+      },
+      {
+        "path": "onnx/model_q4f16.onnx_data",
+        "size": 1990742016,
+        "sha256": "5a6ffe83a69630cf7ff25a3d603b79205e6e2e5a083864fff7b499bd3b6ea305"
+      },
+      {
+        "path": "onnx/model_q4f16.onnx_data_1",
+        "size": 444579840,
+        "sha256": "4ed6c5c062ee2f50beda875935ba234a666cfb73134b27263c169f54696bf815"
+      }
+    ]
+  },
+  "builtin:bge-m3": {
+    "repo": "Xenova/bge-m3",
+    "revision": "4de13258303883538bd53b696b452bf8099f0858",
+    "dir": "bge-m3",
+    "files": [
+      {
+        "path": "config.json",
+        "size": 770,
+        "sha256": null
+      },
+      {
+        "path": "quantize_config.json",
+        "size": 834,
+        "sha256": null
+      },
+      {
+        "path": "special_tokens_map.json",
+        "size": 964,
+        "sha256": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 17082821,
+        "sha256": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size": 1173,
+        "sha256": null
+      },
+      {
+        "path": "onnx/model_quantized.onnx",
+        "size": 569694530,
+        "sha256": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d"
+      }
+    ]
+  }
+}

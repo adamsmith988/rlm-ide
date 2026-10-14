@@ -1,0 +1,367 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "rlm",
+  "name": "Recursive Language Model",
+  "version": "1.0.0",
+  "kind": "agent_harness",
+  "description": "Prime-aligned RLM: persistent IPython kernel, subagents, continual harness, compaction.",
+  "lifecycle": "daemon",
+  "runtime": {
+    "kind": "in_process",
+    "wire": "python_api"
+  },
+  "memory": ["session", "harness", "kernel"],
+  "capabilities": [
+    "stream",
+    "tools",
+    "subagents",
+    "code_exec",
+    "pools",
+    "compaction",
+    "autonomous",
+    "durable_resume",
+    "harness_refine",
+    "multimodal_look"
+  ],
+  "operations": [
+    "create",
+    "run",
+    "continue",
+    "status",
+    "shutdown",
+    "events"
+  ],
+  "depends_on": [],
+  "context_window": { "min_tokens": 16384 },
+  "host_ports": [
+    { "id": "chat", "required": true },
+    { "id": "tools", "required": true },
+    { "id": "chat_stream", "required": false },
+    { "id": "pools.search", "required": false },
+    { "id": "pools.resolve", "required": false },
+    { "id": "pools.list", "required": false },
+    { "id": "pools.read", "required": false },
+    { "id": "events", "required": false },
+    { "id": "spawn_child", "required": false },
+    { "id": "model_finder", "required": false }
+  ],
+  "tools_binding": {
+    "mode": "kernel_callable",
+    "config_key": "tool_ids",
+    "host_port": "tools",
+    "selection": "host_provided",
+    "surface": {
+      "namespace": "tools",
+      "call_pattern": "await tools.<id>(**kwargs)"
+    }
+  },
+  "session_binding": {
+    "mode": "durable",
+    "key_from": "chat_session_id",
+    "engine_session_prefix": "rlm_chat_",
+    "first_op": "run",
+    "next_op": "continue",
+    "stores": ["session", "harness", "kernel"]
+  },
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "user_content": {},
+      "cfg": { "type": "object", "additionalProperties": true }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "text": { "type": "string" },
+      "status": { "type": "string" }
+    }
+  },
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "system_prompt": { "type": "string" },
+      "enable_thinking": { "type": "boolean" },
+      "temperature": { "type": "number" },
+      "rlm_max_turns": { "type": "integer" },
+      "max_subagent_depth": { "type": "integer" },
+      "rlm_kernel_timeout_sec": { "type": "integer" },
+      "rlm_autonomous": { "type": "boolean" },
+      "rlm_autonomous_max_continuations": { "type": "integer" },
+      "rlm_synthesis_turns": { "type": "integer" },
+      "rlm_autonomous_strict": { "type": "boolean" },
+      "run_lifetime": { "type": "string", "enum": ["one_shot", "heartbeat", "chat"] },
+      "heartbeat_interval_sec": { "type": "integer" },
+      "heartbeat_prompt": { "type": "string" },
+      "daemon_enabled": { "type": "boolean" },
+      "refine_enabled": { "type": "boolean" },
+      "refine_auto_enabled": { "type": "boolean" },
+      "refine_turn_interval": { "type": "integer" },
+      "refine_cooldown_sec": { "type": "integer" },
+      "refine_on_compact": { "type": "boolean" },
+      "compact_model": { "type": "string" },
+      "min_context_length": { "type": "integer" },
+      "rlm_tool_description_chars": { "type": "integer" },
+      "rlm_tool_signature_max_params": { "type": "integer" },
+      "rlm_tool_usage_hint": { "type": "string" },
+      "rlm_tool_result_preview_chars": { "type": "integer" },
+      "host_context_blocks": { "type": "string" },
+      "tool_ids": { "type": "array", "items": { "type": "string" } }
+    }
+  },
+  "settings_ui": [
+    {
+      "name": "system_prompt",
+      "type": "string",
+      "multiline": true,
+      "label": "System prompt",
+      "label_fa": "پرامپت سیستم",
+      "default": "",
+      "advanced": false
+    },
+    {
+      "name": "enable_thinking",
+      "type": "boolean",
+      "label": "Model thinking",
+      "label_fa": "فکر مدل (thinking)",
+      "default": true
+    },
+    {
+      "name": "temperature",
+      "type": "float",
+      "label": "Temperature",
+      "label_fa": "دما",
+      "default": 0.7,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.05,
+      "advanced": true
+    },
+    {
+      "name": "rlm_max_turns",
+      "type": "int",
+      "label": "RLM max turns",
+      "label_fa": "حداکثر نوبت RLM",
+      "default": 0,
+      "min": 0,
+      "step": 1,
+      "advanced": true
+    },
+    {
+      "name": "max_subagent_depth",
+      "type": "int",
+      "label": "Max subagent depth",
+      "label_fa": "عمق ساب‌ایجنت",
+      "default": 2,
+      "min": 0,
+      "max": 8,
+      "advanced": true
+    },
+    {
+      "name": "rlm_kernel_timeout_sec",
+      "type": "int",
+      "label": "Kernel cell timeout (sec)",
+      "label_fa": "مهلت سلول کرنل (ثانیه)",
+      "default": 0,
+      "min": 0,
+      "max": 3600,
+      "advanced": true
+    },
+    {
+      "name": "rlm_autonomous",
+      "type": "boolean",
+      "label": "RLM autonomous continuation",
+      "label_fa": "ادامهٔ خودکار RLM",
+      "default": true,
+      "advanced": true
+    },
+    {
+      "name": "rlm_autonomous_max_continuations",
+      "type": "int",
+      "label": "Autonomous max continuations",
+      "label_fa": "سقف continuation خودکار",
+      "default": 0,
+      "min": 0,
+      "max": 500,
+      "advanced": true
+    },
+    {
+      "name": "rlm_synthesis_turns",
+      "type": "int",
+      "label": "RLM synthesis turns",
+      "label_fa": "نوبت‌های synthesis",
+      "default": 5,
+      "min": 0,
+      "max": 20,
+      "advanced": true
+    },
+    {
+      "name": "rlm_autonomous_strict",
+      "type": "boolean",
+      "label": "Strict completion (artifact required)",
+      "label_fa": "تکمیل سخت‌گیرانه",
+      "default": false,
+      "advanced": true
+    },
+    {
+      "name": "run_lifetime",
+      "type": "combo",
+      "label": "RLM lifetime",
+      "label_fa": "عمر سشن RLM",
+      "default": "chat",
+      "options": [
+        { "value": "chat", "label": "Chat (multi-turn memory)", "label_fa": "چت (حافظه چندنوبتی)" },
+        { "value": "one_shot", "label": "One shot", "label_fa": "یک‌بار" },
+        { "value": "heartbeat", "label": "Heartbeat", "label_fa": "Heartbeat" }
+      ],
+      "advanced": true
+    },
+    {
+      "name": "heartbeat_interval_sec",
+      "type": "int",
+      "label": "Heartbeat interval (sec)",
+      "label_fa": "فاصلهٔ heartbeat (ثانیه)",
+      "default": 300,
+      "min": 30,
+      "max": 86400,
+      "advanced": true,
+      "disabled_when": { "field": "run_lifetime", "not_equals": "heartbeat" }
+    },
+    {
+      "name": "heartbeat_prompt",
+      "type": "string",
+      "multiline": true,
+      "label": "Heartbeat prompt",
+      "label_fa": "پرامپت heartbeat",
+      "default": "",
+      "advanced": true,
+      "disabled_when": { "field": "run_lifetime", "not_equals": "heartbeat" }
+    },
+    {
+      "name": "daemon_enabled",
+      "type": "boolean",
+      "label": "RLM daemon session",
+      "label_fa": "سشن daemon",
+      "default": true,
+      "advanced": true
+    },
+    {
+      "name": "refine_enabled",
+      "type": "boolean",
+      "label": "Enable harness refine",
+      "label_fa": "فعال‌سازی refine هارنس",
+      "default": true,
+      "advanced": true
+    },
+    {
+      "name": "refine_auto_enabled",
+      "type": "boolean",
+      "label": "Auto-refine",
+      "label_fa": "refine خودکار",
+      "default": true,
+      "advanced": true,
+      "disabled_when": { "field": "refine_enabled", "equals": false }
+    },
+    {
+      "name": "refine_turn_interval",
+      "type": "int",
+      "label": "Auto-refine turn interval",
+      "label_fa": "فاصلهٔ turn برای auto-refine",
+      "default": 25,
+      "min": 1,
+      "max": 500,
+      "advanced": true,
+      "disabled_when": { "field": "refine_auto_enabled", "equals": false }
+    },
+    {
+      "name": "refine_cooldown_sec",
+      "type": "int",
+      "label": "Auto-refine cooldown (sec)",
+      "label_fa": "کول‌داون auto-refine (ثانیه)",
+      "default": 1200,
+      "min": 0,
+      "max": 86400,
+      "advanced": true,
+      "disabled_when": { "field": "refine_auto_enabled", "equals": false }
+    },
+    {
+      "name": "refine_on_compact",
+      "type": "boolean",
+      "label": "Auto-refine after compact",
+      "label_fa": "refine بعد از compact",
+      "default": true,
+      "advanced": true,
+      "disabled_when": { "field": "refine_enabled", "equals": false }
+    },
+    {
+      "name": "compact_model",
+      "type": "string",
+      "label": "Compaction summarizer model",
+      "label_fa": "مدل خلاصه‌ساز compact",
+      "default": "",
+      "advanced": true
+    },
+    {
+      "name": "rlm_tool_description_chars",
+      "type": "int",
+      "label": "Project tool description length (chars, 0 = full)",
+      "label_fa": "طول توضیح ابزارهای پروژه (کاراکتر، ۰ = کامل)",
+      "default": 280,
+      "min": 0,
+      "max": 4000,
+      "advanced": true
+    },
+    {
+      "name": "rlm_tool_usage_hint",
+      "type": "string",
+      "label": "Project tools: usage guidance ({namespace} = tools object; empty = off)",
+      "label_fa": "راهنمای استفاده از ابزارهای پروژه ({namespace} = شیء ابزارها؛ خالی = خاموش)",
+      "default": "When the user asks for several independent things, run those calls together in one cell: `a, b = await asyncio.gather({namespace}.<x>(...), {namespace}.<y>(...))` (after `import asyncio`); chain calls one after another only when a later call needs an earlier result. Call a tool that changes something (book, cancel, pay, send) only when the user has asked for that action and has not told you to wait; if a required value is missing, ask for it.",
+      "advanced": true
+    },
+    {
+      "name": "rlm_tool_signature_max_params",
+      "type": "int",
+      "label": "Project tool parameters shown (0 = all)",
+      "label_fa": "تعداد پارامترهای نمایش‌داده‌شدهٔ ابزار (۰ = همه)",
+      "default": 8,
+      "min": 0,
+      "max": 64,
+      "advanced": true
+    },
+    {
+      "name": "rlm_tool_result_preview_chars",
+      "type": "int",
+      "label": "Tool result preview in the timeline (chars, 0 = full)",
+      "label_fa": "پیش‌نمایش نتیجهٔ ابزار در تایم‌لاین (کاراکتر، ۰ = کامل)",
+      "default": 500,
+      "min": 0,
+      "max": 20000,
+      "advanced": true
+    },
+    {
+      "name": "host_context_blocks",
+      "type": "string",
+      "label": "Per-turn host context (comma-separated block names, * = all, empty = none)",
+      "label_fa": "زمینهٔ میزبان در هر نوبت (نام بلوک‌ها با کاما، * = همه، خالی = هیچ)",
+      "default": "*",
+      "advanced": true
+    }
+  ],
+  "artifacts": ["deliverable", "session_jsonl", "kernel_snapshot"],
+  "resource": {
+    "weight": 1,
+    "max_parallel": 1
+  },
+  "extensions": {
+    "worker_module": "src.orchestrators.rlm.runtime.worker",
+    "lineage": "agent_flow.rlm_runtime",
+    "chat_stream": true,
+    "stream_entry": "src.orchestrators.rlm_chat_stream:stream_agent_rlm",
+    "release_entry": "src.orchestrators.rlm_chat_stream:release_rlm_chat"
+  }
+}

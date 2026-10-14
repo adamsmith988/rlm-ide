@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "id": "srlm",
+  "name": "Self-Reflective Program Search",
+  "version": "0.1.0",
+  "kind": "search_controller",
+  "description": "Fixture only — Apple SRLM K-peer search over RLM (not implemented yet).",
+  "lifecycle": "one_shot",
+  "runtime": {
+    "kind": "controller",
+    "wire": "python_api"
+  },
+  "memory": ["session", "kernel"],
+  "capabilities": [
+    "ensemble_search",
+    "isolated_workspaces",
+    "code_exec",
+    "subagents"
+  ],
+  "operations": ["create", "run", "search", "select", "status", "shutdown"],
+  "depends_on": ["rlm"],
+  "host_ports": [
+    { "id": "chat", "required": true },
+    { "id": "tools", "required": false },
+    { "id": "events", "required": false }
+  ],
+  "artifacts": ["deliverable"],
+  "resource": {
+    "weight": 8,
+    "max_parallel": 8
+  },
+  "config_schema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "K": { "type": "integer", "minimum": 1 },
+      "direct_threshold_tokens": { "type": "integer" },
+      "answer_mode": {
+        "type": "string",
+        "enum": ["string", "claim_json", "checklist_hash"]
+      }
+    }
+  },
+  "input_schema": { "type": "object", "additionalProperties": true },
+  "output_schema": { "type": "object", "additionalProperties": true },
+  "extensions": { "fixture_only": true }
+}
