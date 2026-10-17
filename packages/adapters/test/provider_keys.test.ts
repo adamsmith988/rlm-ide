@@ -55,6 +55,7 @@ function router(key: string | null): { r: ProviderRouter; s: Settings } {
     },
     localEmbed: async () => null,
     localNativeContext: () => null,
+    continuePrompt: () => "continue",
   });
   return { r, s };
 }

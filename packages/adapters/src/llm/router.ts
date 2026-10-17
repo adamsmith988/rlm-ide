@@ -1,6 +1,7 @@
 import type { ModelConfig, ProviderConfig, Settings } from "@rlm/contracts";
 import type { ChatModelPort, EmbeddingPort, ModelCatalogPort, ModelLimitsInfo, ModelRouterPort } from "@rlm/core";
 import { detectOpenAICompatLimits, OpenAICompatChat, OpenAICompatEmbed, type OpenAICompatConfig } from "./openai_compat";
+import { FailoverChat, ModelHealth } from "./failover";
 
 export interface RouterDeps {
   settings: () => Settings;
@@ -11,6 +12,9 @@ export interface RouterDeps {
   localEmbed: (model: ModelConfig) => Promise<EmbeddingPort | null>;
   /** Max context the local model itself supports (from its config.json), null if not installed. */
   localNativeContext: (model: ModelConfig) => number | null;
+  /** User message asking the next model in a failover chain to continue a cut-off reply. */
+  continuePrompt: () => string;
+  log?: (msg: string, meta: Record<string, unknown>) => void;
 }
 
 /** Picks an adapter per role: agent, summarizer, embed. Multi-provider: local ONNX or any
@@ -18,12 +22,23 @@ export interface RouterDeps {
 export class ProviderRouter implements ModelRouterPort, ModelCatalogPort {
   private readonly chatCache = new Map<string, ChatModelPort>();
   private readonly embedCache = new Map<string, EmbeddingPort>();
+  /** Cooldowns of failed models, shared by every failover chain. */
+  readonly health = new ModelHealth();
 
   constructor(private readonly d: RouterDeps) {}
 
   invalidate(): void {
     this.chatCache.clear();
     this.embedCache.clear();
+    this.health.clear();
+  }
+
+  /** The role's model followed by its fallbacks: configured chat models only, no repeats. A separate summarizer falls
+   * back to the agent chain, so compaction checkpoints and memory distillation never stop with it. */
+  chainFor(role: "agent" | "summarizer"): string[] {
+    const s = this.d.settings();
+    const isChat = (id: string) => s.models.some((m) => m.id === id && m.kind === "chat");
+    return [...new Set([this.modelIdFor(role), s.roles.agent, ...s.roles.agentFallbacks])].filter(isChat);
   }
 
   modelIdFor(role: "agent" | "summarizer" | "embed"): string {
@@ -42,11 +57,31 @@ export class ProviderRouter implements ModelRouterPort, ModelCatalogPort {
   }
 
   private apiConfig(model: ModelConfig, provider: ProviderConfig): OpenAICompatConfig {
-    return { baseUrl: provider.baseUrl, apiKey: this.d.apiKey(provider.id), model: model.name, stallMs: this.d.settings().rlm.modelStallSec * 1000 };
+    return { baseUrl: provider.baseUrl, apiKey: this.d.apiKey(provider.id), model: model.name, stallMs: this.d.settings().rlm.modelStallSec * 1000, systemAsUser: model.systemAsUser };
   }
 
   async chat(role: "agent" | "summarizer"): Promise<ChatModelPort> {
-    return this.chatFor(this.modelIdFor(role));
+    const s = this.d.settings();
+    const ids = this.chainFor(role);
+    if (!s.failover.enabled || ids.length === 0) return this.chatFor(this.modelIdFor(role));
+    const key = `failover:${ids.join("|")}`;
+    const cached = this.chatCache.get(key);
+    if (cached) return cached;
+    const chain = await Promise.all(
+      ids.map(async (id) => {
+        const m = s.models.find((x) => x.id === id)!;
+        const lim = await this.limits(id);
+        return { id, label: m.label || m.name, contextLength: lim.contextLength, maxOutputTokens: lim.maxOutputTokens, port: () => this.chatFor(id) };
+      }),
+    );
+    const port = new FailoverChat(chain, {
+      settings: () => this.d.settings().failover,
+      health: this.health,
+      continuePrompt: this.d.continuePrompt,
+      log: this.d.log,
+    });
+    this.chatCache.set(key, port);
+    return port;
   }
 
   /** Chat adapter for one configured model, independent of role assignments. */

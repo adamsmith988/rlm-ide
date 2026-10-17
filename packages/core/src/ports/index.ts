@@ -23,11 +23,18 @@ export interface ChatRequest {
 export type ChatChunk =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
-  | { type: "usage"; inputTokens: number; outputTokens: number };
+  | { type: "usage"; inputTokens: number; outputTokens: number }
+  /** A failover chain moved to another model. `resumed` = the new model continues a reply the old one started. */
+  | { type: "switch"; from: string; to: string; reason: string; resumed: boolean }
+  /** Progress the user should see that is not model output (for example: every model is cooling down). */
+  | { type: "notice"; text: string };
 
 export interface ChatModelPort {
   readonly modelId: string;
   stream(req: ChatRequest): AsyncIterable<ChatChunk>;
+  /** Window of the model that will serve the next request, for ports that move between models (failover chains).
+   * Null or absent: the configured limits apply. */
+  activeLimits?(): ModelLimitsInfo | null;
 }
 
 /** Thrown by chat adapters when the provider rejects a request for length. */
@@ -35,6 +42,18 @@ export class ContextOverflowError extends Error {
   constructor(message = "context length exceeded") {
     super(message);
     this.name = "ContextOverflowError";
+  }
+}
+
+/** The models available right now have a smaller window than the prompt was built for (a failover chain fell back
+ * to a backup): compact to the active limits and retry. Unlike a provider overflow, the token estimate was right. */
+export class ModelWindowError extends ContextOverflowError {
+  constructor(
+    message: string,
+    readonly contextLength: number,
+  ) {
+    super(message);
+    this.name = "ModelWindowError";
   }
 }
 

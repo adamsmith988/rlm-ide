@@ -3,10 +3,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { defaultSettings, type Settings, type TurnEvent } from "@rlm/contracts";
-import { ContextOverflowError, Orchestrator, TaskBoards, type ChatChunk, type ChatModelPort, type ChatRequest } from "@rlm/core";
+import { ContextOverflowError, Orchestrator, TaskBoards, estimateMessagesTokens, type ChatChunk, type ChatModelPort, type ChatRequest } from "@rlm/core";
 import { HashEmbedder, ScriptedModel, clock, log, prompts, status } from "../../core/test/fakes";
 import {
   createBuiltinTools,
+  FailoverChat,
+  ModelHealth,
+  ModelHttpError,
   FileSnapshotStore,
   FileTaskBoardStore,
   openDb,
@@ -258,6 +261,117 @@ describe("prompt size as the server counts it", () => {
     const lastReq = model.requests[model.requests.length - 1]!;
     // The meter shows what the server counts, not the raw character estimate.
     expect(last.usedTokens).toBeGreaterThanOrEqual(lastReq.counted * 0.95);
+    await h.orch.engine.shutdownAll();
+  }, 90000);
+});
+
+/** A model that enforces its window with the IDE's own estimate and can be told to start failing. */
+class WindowedModel implements ChatModelPort {
+  readonly calls: ChatRequest[] = [];
+  failWith: Error | null = null;
+  constructor(
+    readonly modelId: string,
+    private readonly ctx: number,
+    private readonly reply: (req: ChatRequest, n: number) => string,
+  ) {}
+  async *stream(req: ChatRequest): AsyncIterable<ChatChunk> {
+    if (this.failWith) throw this.failWith;
+    const counted = estimateMessagesTokens(req.messages);
+    if (counted + req.maxTokens > this.ctx) throw new ContextOverflowError(`${this.modelId}: prompt of ${counted} + ${req.maxTokens} output tokens exceeds ${this.ctx}`);
+    this.calls.push(req);
+    const text = this.reply(req, this.calls.length - 1);
+    for (let i = 0; i < text.length; i += 9) yield { type: "text", text: text.slice(i, i + 9) };
+  }
+}
+
+describe("switching models mid-job", () => {
+  it("fits the conversation into a smaller backup and keeps the request, board, earlier work and memories", async () => {
+    const h = harness({ contextLength: 32000, maxOutputTokens: 1500 });
+    h.settings.rlm.cellOutputLimitChars = 12000;
+    h.settings.rlm.oldOutputKeepChars = 12000;
+    const chat = await h.orch.createChat("switch");
+    await h.orch.memory.addFact(h.orch.scope(chat.id), "Deploy target for the logs crunch job: the staging cluster BLUEJAY.", "preference");
+    const big = new WindowedModel("big", 32000, (_req, n) => {
+      if (n === 0) return "```repl\ntask.plan(goal='Crunch the logs', steps=['read', 'crunch', 'answer'])\ntask.step(index=0, status='done', note='found 7 log files')\nprint('planned')\n```";
+      return `\`\`\`repl\nprint('chunk ${n} ' + 'x' * 11000)\n\`\`\``;
+    });
+    const small = new WindowedModel("small", 12000, (_req, n) => (n === 0 ? "```repl\ntask.step(index=1, status='done')\nprint('crunched')\n```" : "Done: the code word was ORCHID-19 and the deploy target is BLUEJAY."));
+    const health = new ModelHealth();
+    h.models.agent = new FailoverChat(
+      [
+        { id: "big", label: "Big", contextLength: 32000, maxOutputTokens: 1500, port: async () => big },
+        { id: "small", label: "Small", contextLength: 12000, maxOutputTokens: 1000, port: async () => small },
+      ],
+      { settings: () => h.settings.failover, health, continuePrompt: () => "continue" },
+    );
+    // Once the transcript outgrows the backup's window, the big model gets rate limited for the rest of the turn.
+    const watch = setInterval(() => {
+      if (big.calls.length >= 5) big.failWith = new ModelHttpError(429, "rate limited", 600_000);
+    }, 5);
+    const request = "Crunch the logs for the deploy target and tell me the code word. Constraint: never delete files. Code word: ORCHID-19.";
+    const { turnId } = await h.orch.send({ chatId: chat.id, text: request, editorContext: {} });
+    const end = await h.waitDone(turnId, 60000);
+    clearInterval(watch);
+    expect(end.type).toBe("turn_done");
+    const ev = h.events.filter((e) => e.turnId === turnId);
+    expect(ev.some((e) => e.type === "model_switch" && e.to === "Small")).toBe(true);
+    expect(ev.some((e) => e.type === "compaction")).toBe(true);
+    expect(small.calls.length).toBeGreaterThan(0);
+    const recalled = ev.find((e) => e.type === "memory_recalled") as Extract<TurnEvent, { type: "memory_recalled" }>;
+    expect(recalled.items.some((m) => m.text.includes("BLUEJAY"))).toBe(true);
+    for (const req of small.calls) {
+      // Every request fit the backup's window, and it still saw the job: request, board, memory, earlier work.
+      expect(estimateMessagesTokens(req.messages) + req.maxTokens).toBeLessThanOrEqual(12000);
+      expect(req.maxTokens).toBeLessThanOrEqual(1000);
+      expect(transcript(req)).toContain(request);
+      expect(system(req)).toContain("Goal: Crunch the logs");
+      expect(system(req)).toContain("found 7 log files");
+      expect(system(req)).toContain("BLUEJAY");
+      expect(system(req)).toMatch(/chunk \d/);
+    }
+    // The prompt that no longer fit was never sent to the backup, so it was not marked broken.
+    expect(health.available("small")).toBe(true);
+    const usage = ev.filter((e) => e.type === "context_usage") as Array<Extract<TurnEvent, { type: "context_usage" }>>;
+    expect(usage.at(-1)!.contextLength).toBe(12000);
+    expect(ev.map((e) => (e.type === "text_delta" ? e.text : "")).join("")).toContain("the code word was ORCHID-19 and the deploy target is BLUEJAY");
+    await h.orch.engine.shutdownAll();
+  }, 90000);
+
+  it("learns a free model's real window from a refused prompt, compacts to it and keeps the job and memory", async () => {
+    // Advertised 64k tokens, really takes about 9k: what web-playground providers behind a gateway do.
+    const h = harness({ contextLength: 64000, maxOutputTokens: 1500 });
+    const chat = await h.orch.createChat("hidden window");
+    await h.orch.memory.addFact(h.orch.scope(chat.id), "Deploy target for the logs crunch job: the staging cluster BLUEJAY.", "preference");
+    const tiny = new WindowedModel("tiny", 9000, (_req, n) => {
+      if (n === 0) return "```repl\ntask.plan(goal='Crunch the logs', steps=['read', 'crunch', 'answer'])\ntask.step(index=0, status='done', note='found 7 log files')\nprint('planned')\n```";
+      if (n < 5) return `\`\`\`repl\nprint('chunk ${n} ' + 'x' * 11000)\n\`\`\``;
+      return "Done: the code word was ORCHID-19 and the deploy target is BLUEJAY.";
+    });
+    const health = new ModelHealth();
+    h.models.agent = new FailoverChat([{ id: "tiny", label: "Tiny", contextLength: 64000, maxOutputTokens: 1500, port: async () => tiny }], {
+      settings: () => h.settings.failover,
+      health,
+      continuePrompt: () => "continue",
+    });
+    const request = "Crunch the logs for the deploy target and tell me the code word. Code word: ORCHID-19.";
+    const { turnId } = await h.orch.send({ chatId: chat.id, text: request, editorContext: {} });
+    const end = await h.waitDone(turnId, 60000);
+    expect(end.type).toBe("turn_done");
+    const ev = h.events.filter((e) => e.turnId === turnId);
+    // The refusal taught the chain the real window without a cooldown, and the engine compacted down to it.
+    expect(health.learnedWindow("tiny")).toBeLessThan(9000);
+    expect(health.available("tiny")).toBe(true);
+    expect(ev.some((e) => e.type === "compaction")).toBe(true);
+    const usage = ev.filter((e) => e.type === "context_usage") as Array<Extract<TurnEvent, { type: "context_usage" }>>;
+    expect(usage.at(-1)!.contextLength).toBe(health.learnedWindow("tiny"));
+    // Small window: the tool docs shrink to their short form; the job, board and memory still reach the model.
+    expect(system(tiny.calls[0]!)).not.toContain("Short form for a small context window");
+    const last = tiny.calls.at(-1)!;
+    expect(system(last)).toContain("Short form for a small context window");
+    expect(system(last)).toContain("Goal: Crunch the logs");
+    expect(system(last)).toContain("BLUEJAY");
+    expect(transcript(last)).toContain(request);
+    expect(ev.map((e) => (e.type === "text_delta" ? e.text : "")).join("")).toContain("the code word was ORCHID-19 and the deploy target is BLUEJAY");
     await h.orch.engine.shutdownAll();
   }, 90000);
 });

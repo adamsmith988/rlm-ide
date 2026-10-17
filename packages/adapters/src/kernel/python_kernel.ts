@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import type { CellOutput, CellResult, HostRequestHandler, KernelFactory, KernelSession, LoggerPort, ToolDescriptor } from "@rlm/core";
+import { toolDoc, type CellOutput, type CellResult, type HostRequestHandler, type KernelFactory, type KernelSession, type LoggerPort, type ToolDescriptor } from "@rlm/core";
 import { REWRITE_MAX_CHANGED, REWRITE_MIN_LINES } from "../tools/rewrite_guard";
 
 /** Grace period after an interrupt before the worker is killed and restarted. */
@@ -121,7 +121,7 @@ class PythonKernel implements KernelSession {
       op: "bootstrap",
       output_limit: this.o.outputLimitChars,
       rewrite_guard: { min_lines: REWRITE_MIN_LINES, max_changed: REWRITE_MAX_CHANGED },
-      tools: this.o.tools.map((t) => ({ id: t.id, params: Object.keys(t.parameters.properties ?? {}).sort((a, b) => Number((t.parameters.required ?? []).includes(b)) - Number((t.parameters.required ?? []).includes(a))), doc: t.description })),
+      tools: this.o.tools.map((t) => ({ id: t.id, params: Object.keys(t.parameters.properties ?? {}).sort((a, b) => Number((t.parameters.required ?? []).includes(b)) - Number((t.parameters.required ?? []).includes(a))), doc: toolDoc(t) })),
     });
     await boot;
   }

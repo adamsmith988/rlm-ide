@@ -11,6 +11,7 @@ export type Block =
   | { kind: "subagent"; agentId: string; parentPath: string[]; task: string; done?: boolean; ok?: boolean; result?: string }
   | { kind: "edit"; editId: string; path: string; before: string; after: string }
   | { kind: "status"; text: string }
+  | { kind: "switch"; from: string; to: string; reason: string; resumed: boolean }
   | { kind: "error"; text: string };
 
 export interface UiMessage {
@@ -58,14 +59,30 @@ export function applyEvent(m: UiMessage, ev: TurnEvent): UiMessage {
       if (last?.kind === "status") blocks[blocks.length - 1] = { kind: "status", text: ev.text };
       else blocks.push({ kind: "status", text: ev.text });
       break;
+    case "model_switch": {
+      const b: Block = { kind: "switch", from: ev.from, to: ev.to, reason: ev.reason, resumed: ev.resumed };
+      if (last?.kind === "status") blocks[blocks.length - 1] = b;
+      else blocks.push(b);
+      break;
+    }
     case "thinking_delta":
       if (last?.kind === "thinking") blocks[blocks.length - 1] = { ...last, text: last.text + ev.text };
       else blocks.push({ kind: "thinking", text: ev.text });
       break;
-    case "text_delta":
-      if (last?.kind === "text") blocks[blocks.length - 1] = { ...last, text: last.text + ev.text };
-      else blocks.push({ kind: "text", text: ev.text });
+    case "text_delta": {
+      if (last?.kind === "text") {
+        blocks[blocks.length - 1] = { ...last, text: last.text + ev.text };
+        break;
+      }
+      // A reply continued by another model stays one text block; the switches and thoughts move above it.
+      const j = resumedText(blocks);
+      if (j >= 0) {
+        const between = blocks.splice(j + 1);
+        const t = blocks.pop() as Extract<Block, { kind: "text" }>;
+        blocks.push(...between, { ...t, text: t.text + ev.text });
+      } else blocks.push({ kind: "text", text: ev.text });
       break;
+    }
     case "generation":
       next.progress = { phase: ev.phase, outputTokens: ev.outputTokens, tokPerSec: ev.tokPerSec, step: ev.step, ts: ev.ts };
       if (ev.phase !== "writing_code") next.draft = null;
@@ -144,6 +161,19 @@ export function applyEvent(m: UiMessage, ev: TurnEvent): UiMessage {
       break;
   }
   return next;
+}
+
+/** Index of the text block a continued reply belongs to: only switches, thoughts and status lines follow it, and one
+ * of those switches resumed the reply. -1 when the new text starts a new block. */
+function resumedText(blocks: Block[]): number {
+  let resumed = false;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]!;
+    if (b.kind === "text") return resumed ? i : -1;
+    if (b.kind === "switch") resumed ||= b.resumed;
+    else if (b.kind !== "thinking" && b.kind !== "status") return -1;
+  }
+  return -1;
 }
 
 function findLast<T>(arr: T[], pred: (x: T) => boolean): number {

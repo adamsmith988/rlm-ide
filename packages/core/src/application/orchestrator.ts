@@ -1,6 +1,7 @@
 import type { Settings, TurnEvent, TurnEventBody, ChatSummary, StoredMessage } from "@rlm/contracts";
 import { latestCheckpoint, verbatimTurns, type StoredTurn } from "../domain/conversation";
 import { clipChars } from "../domain/tokens";
+import { narrowLimits } from "../domain/budget";
 import type {
   ClockPort,
   ConversationRepo,
@@ -295,7 +296,8 @@ export class Orchestrator {
       // 1. model limits
       const limits = await this.d.catalog.limits(modelId);
       if (!limits.contextLength) throw new Error(`The context length of model '${modelId}' is unknown. Set it in Settings → Models before sending.`);
-      const modelLimits = { contextLength: limits.contextLength, maxOutputTokens: limits.maxOutputTokens ?? Math.floor(limits.contextLength / 4) };
+      const agent = await this.d.router.chat("agent");
+      const modelLimits = narrowLimits({ contextLength: limits.contextLength, maxOutputTokens: limits.maxOutputTokens ?? Math.floor(limits.contextLength / 4) }, agent.activeLimits?.());
 
       // 2. session workspace + session compaction
       const cp0 = latestCheckpoint(prior);

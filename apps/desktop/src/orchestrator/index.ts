@@ -153,6 +153,7 @@ function init(i: Record<string, unknown>): void {
   pinned = new SqlitePinnedFacts(db);
   workspace = new Workspace(pm);
   const embedders = new Map<string, BgeM3Embedder>();
+  const prompts = new FilePrompts(String(i.promptsDir));
 
   router = new ProviderRouter({
     settings: () => settings,
@@ -183,6 +184,8 @@ function init(i: Record<string, unknown>): void {
         return null;
       }
     },
+    continuePrompt: () => prompts.get("failover/continue.md"),
+    log: (msg, meta) => log.warn(msg, meta),
   });
 
   kernels = new PythonKernelFactory({
@@ -231,7 +234,7 @@ function init(i: Record<string, unknown>): void {
     edits,
     kernels,
     tools,
-    prompts: new FilePrompts(String(i.promptsDir)),
+    prompts,
     workspace,
     clock: { now: () => Date.now() },
     log,

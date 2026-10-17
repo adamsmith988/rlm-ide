@@ -21,6 +21,7 @@ const api: RlmApi & { pushEditorState(state: unknown): void } = {
   onBrowserState: on("browser:state"),
   onTeamState: on("team:state"),
   onHubState: on("hub:state"),
+  onOmniRouteState: on("omniroute:state"),
   onTaskBoard: on("task:board"),
   onTeamEvent: on("team:event"),
   browserBounds: (bounds, visible) => ipcRenderer.send("browser:bounds", bounds, visible),

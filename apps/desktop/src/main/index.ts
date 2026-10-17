@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
-import { existsSync, statSync } from "node:fs";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, net, protocol, shell } from "electron";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -15,7 +15,7 @@ import { paths } from "./paths";
 import { PtyService } from "./pty_service";
 import { SecretStore, SettingsStore } from "./settings_store";
 import { TeamManager } from "./team_manager";
-import { HubService } from "@rlm/hub";
+import { HubService, OmniRouteService } from "@rlm/hub";
 
 // WebGPU for the built-in model (Linux needs Vulkan enabled explicitly).
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
@@ -61,6 +61,22 @@ const hub = new HubService({
   secrets,
   emit: (s) => send("hub:state", s),
   log: (msg) => console.warn(`[hub] ${msg}`),
+});
+const omniroute = new OmniRouteService({
+  dir: path.join(app.getPath("userData"), "omniroute"),
+  settings: () => settings.get(),
+  updateSettings: (patch) => settings.update(patch as Record<string, unknown>),
+  secrets,
+  emit: (s) => send("omniroute:state", s),
+  log: (msg) => console.warn(`[omniroute] ${msg}`),
+  keysChanged: () => pushSettingsToOrchestrator(settings.get()),
+  agentPrompt: () => {
+    try {
+      return readFileSync(path.join(paths.prompts, "rlm", "system.md"), "utf8");
+    } catch {
+      return null;
+    }
+  },
 });
 
 function needWorkspace(): string {
@@ -384,6 +400,30 @@ async function handle(channel: IpcChannel, payload: Record<string, unknown>): Pr
       return hub.setToken(String(payload.token));
     case "hub:log":
       return hub.readLog(String(payload.id));
+    case "omniroute:state":
+      return omniroute.state();
+    case "omniroute:install":
+      return omniroute.install();
+    case "omniroute:service":
+      if (payload.action === "stop") return omniroute.stop();
+      if (payload.action === "restart") await omniroute.stop();
+      return omniroute.start();
+    case "omniroute:catalog":
+      return omniroute.refreshCatalog();
+    case "omniroute:connect":
+      return omniroute.connect(String(payload.provider), String(payload.key ?? "").trim());
+    case "omniroute:disconnect":
+      return omniroute.disconnect(String(payload.connectionId));
+    case "omniroute:probe":
+      return omniroute.probe(payload.models as string[]);
+    case "omniroute:setup":
+      return omniroute.setup(payload.models as string[]);
+    case "omniroute:dashboard": {
+      const password = secrets.get("omniroute:dashboard");
+      if (password) clipboard.writeText(password);
+      await shell.openExternal(omniroute.state().dashboardUrl);
+      return { copied: !!password };
+    }
     case "team:state":
       return team.state();
     case "team:profile":
@@ -505,6 +545,7 @@ app.whenReady().then(async () => {
   createWindow();
   void team.boot();
   void hub.boot().catch((e: unknown) => console.warn(`[hub] boot failed: ${String(e)}`));
+  void omniroute.boot().catch((e: unknown) => console.warn(`[omniroute] boot failed: ${String(e)}`));
   if (app.isPackaged && settings.get().autoUpdate) {
     import("electron-updater")
       .then(({ autoUpdater }) => {
@@ -523,6 +564,7 @@ function stopServices(): void {
   orch.stop();
   inference.stop();
   hub.close();
+  omniroute.close();
   void team.close();
 }
 

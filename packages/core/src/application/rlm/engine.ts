@@ -1,11 +1,12 @@
 import type { RlmSettings, CompactSettings, TurnEventBody } from "@rlm/contracts";
 import type { ModelLimits } from "../../domain/budget";
-import { computeBudget } from "../../domain/budget";
+import { computeBudget, narrowLimits } from "../../domain/budget";
 import type { Checkpoint, StoredTurn } from "../../domain/conversation";
-import { estimateTokens, clipChars } from "../../domain/tokens";
+import { estimateTokens, clipChars, charsForTokens } from "../../domain/tokens";
 import type { ToolDescriptor } from "../../domain/tools";
 import {
   ContextOverflowError,
+  ModelWindowError,
   render,
   type ChatMessage,
   type ChatModelPort,
@@ -199,10 +200,10 @@ export class RlmEngine {
     }
   }
 
-  private systemPrompt(toolIds: Set<string>, depth: number, rlm: RlmSettings): string {
+  private systemPrompt(toolIds: Set<string>, depth: number, rlm: RlmSettings, compact = false): string {
     const tools = this.deps.tools().filter((t) => toolIds.has(t.id));
     return render(this.deps.prompts.get(depth === 0 ? "rlm/system.md" : "rlm/subagent.md"), {
-      tool_surface: renderToolSurface(tools),
+      tool_surface: renderToolSurface(tools, compact),
       max_depth: String(rlm.maxSubagentDepth),
       can_spawn: depth < rlm.maxSubagentDepth ? "yes" : "no",
     });
@@ -261,9 +262,11 @@ export class RlmEngine {
     }
   }
 
-  private async loop(session: Session, input: RlmTurnInput, agentPath: string[], toolIds: Set<string>, children: Semaphore): Promise<RlmTurnOutput> {
+  private async loop(session: Session, turnInput: RlmTurnInput, agentPath: string[], toolIds: Set<string>, children: Semaphore): Promise<RlmTurnOutput> {
     const model = await this.deps.agentModel();
-    const sys = this.systemPrompt(toolIds, session.depth, input.rlm);
+    let input = turnInput;
+    const fullSys = this.systemPrompt(toolIds, session.depth, input.rlm);
+    let compactSys: string | null = null;
     const resume = this.deps.prompts.get("rlm/compact_resume.md");
     const isRoot = agentPath.length === 0;
     const blocks: HostBlocks = isRoot ? { ...input.blocks } : { memory: "", pinned: "", editor: input.blocks.editor, clock: input.blocks.clock, persona: "" };
@@ -278,7 +281,16 @@ export class RlmEngine {
 
     for (let step = 0; step < input.rlm.maxSteps; step++) {
       if (input.signal.aborted) throw new DOMException("stopped", "AbortError");
+      // A failover chain may be serving from a backup with a smaller window: the transcript is compacted to fit it
+      // (summaries, task board and memory carry everything over) instead of being sent where it cannot fit.
+      const limits = narrowLimits(turnInput.limits, model.activeLimits?.());
+      if (limits.contextLength !== input.limits.contextLength) {
+        this.deps.log.warn("agent context window changed", { from: input.limits.contextLength, to: limits.contextLength, step: step + 1 });
+        if (isRoot && limits.contextLength < input.limits.contextLength) input.emit({ type: "status", text: `Fitting the conversation into the backup model's ${limits.contextLength}-token window` });
+      }
+      input = limits === turnInput.limits ? turnInput : { ...turnInput, limits };
       if (isRoot && input.taskBlock) blocks.task = await input.taskBlock().catch(() => blocks.task ?? "");
+      const sys = estimateTokens(fullSys) > limits.contextLength * input.rlm.toolDocsMaxShare ? (compactSys ??= this.systemPrompt(toolIds, session.depth, input.rlm, true)) : fullSys;
       let messages = buildMessages(sys, resume, blocks, session.entries);
       messages = await this.fitBudget(session, input, sys, resume, blocks, messages, isRoot);
       const estimated = estimate(messages);
@@ -329,6 +341,12 @@ export class RlmEngine {
             counted += c.inputTokens;
             usage.inputTokens += c.inputTokens;
             usage.outputTokens += c.outputTokens;
+          } else if (c.type === "switch") {
+            this.deps.log.warn("agent model switched", { from: c.from, to: c.to, reason: c.reason, resumed: c.resumed, step: step + 1 });
+            if (isRoot) input.emit({ type: "model_switch", from: c.from, to: c.to, reason: c.reason, resumed: c.resumed });
+            else input.emit({ type: "status", text: `Sub-agent switched from ${c.from} to ${c.to} (${c.reason})` });
+          } else if (c.type === "notice") {
+            input.emit({ type: "status", text: c.text });
           }
         }
         const rest = filter.flush();
@@ -336,6 +354,12 @@ export class RlmEngine {
         calibrate(session, estimated, counted);
         overflows = 0;
       } catch (e) {
+        if (e instanceof ModelWindowError && overflows < 3) {
+          overflows++;
+          this.deps.log.warn("only smaller-window models are available; compacting for them", { window: e.contextLength, measured: inputTokens });
+          step--;
+          continue;
+        }
         if (e instanceof ContextOverflowError && overflows < 3) {
           overflows++;
           const said = promptTokensFromOverflow(e.message);
@@ -436,7 +460,7 @@ export class RlmEngine {
         if (r.ok) session.failedCell = undefined;
         else if (r.error && !didNotParse && !r.interrupted && !r.timedOut) session.failedCell = { code, error: r.error };
         const parts = [r.stdout, r.stderr ? `[stderr]\n${r.stderr}` : "", r.result ? `[result] ${r.result}` : "", r.error ? `[error]\n${r.error}` : "", r.error ? syntaxHint(code, r.error) : "", repeated, retryNote, noticeText, r.timedOut ? timeoutHint(input.rlm.cellTimeoutSec) : ""].filter(Boolean);
-        const out = clipChars(parts.join("\n").trim() || "(no output)", input.rlm.cellOutputLimitChars);
+        const out = clipChars(parts.join("\n").trim() || "(no output)", Math.min(input.rlm.cellOutputLimitChars, charsForTokens(input.limits.contextLength * input.rlm.cellOutputMaxShare)));
         outputs.push(out);
         workLog.push(`cell: ${clipChars(code.split("\n").slice(0, 3).join(" | "), 160)} -> ${clipChars(out.replace(/\n/g, " "), 200)}`);
         if (!r.ok && (r.interrupted || r.timedOut)) break;
@@ -483,6 +507,17 @@ export class RlmEngine {
     await this.compactTranscript(session, input, isRoot, false);
     msgs = buildMessages(sys, resume, blocks, session.entries);
     tokens = measure(session, msgs);
+    if (limit(tokens)) {
+      // The window shrank under recent work (a switch to a smaller model): its outputs are clipped to the new window's
+      // share too. The full values stay in the kernel's variables.
+      for (let keep = charsForTokens(input.limits.contextLength * input.rlm.cellOutputMaxShare); limit(tokens) && keep >= 200; keep = Math.floor(keep / 2)) {
+        const clipped = truncateOldOutputs(session.entries, keep, 0);
+        if (!clipped.changed) continue;
+        session.entries = clipped.entries;
+        msgs = buildMessages(sys, resume, blocks, session.entries);
+        tokens = measure(session, msgs);
+      }
+    }
     if (limit(tokens)) {
       throw new Error(`The request needs about ${tokens} tokens but the model context is ${input.limits.contextLength}. Shorten the message or raise the context length in Settings → Models.`);
     }

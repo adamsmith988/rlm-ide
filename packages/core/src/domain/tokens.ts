@@ -1,12 +1,16 @@
-/** Conservative token estimator. Code and non-English text tokenize denser than prose, so we
- * assume fewer characters per token than the usual ~4 to avoid underestimating. */
-const CHARS_PER_TOKEN = 3.2;
+import { CHARS_PER_TOKEN } from "@rlm/contracts";
+
 /** Per-message framing overhead of chat templates (role markers, separators). */
 const MESSAGE_OVERHEAD_TOKENS = 6;
 
 export function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
+
+/** Characters that `estimateTokens` counts as at most `tokens`. */
+export function charsForTokens(tokens: number): number {
+  return Math.max(0, Math.floor(tokens * CHARS_PER_TOKEN));
 }
 
 export function estimateMessagesTokens(messages: ReadonlyArray<{ content: string }>): number {

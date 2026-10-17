@@ -26,6 +26,8 @@ export interface RecalledMemory {
 export type TurnEventBody =
   | { type: "turn_started"; chatId: string; userText: string; model: string; origin?: "user" | "wakeup" }
   | { type: "status"; text: string }
+  /** The agent's failover chain moved to another model mid-turn; the turn keeps going. */
+  | { type: "model_switch"; from: string; to: string; reason: string; resumed: boolean }
   | { type: "thinking_delta"; text: string }
   | { type: "text_delta"; text: string }
   /** The code cell the model is still writing: last lines only, throttled. Replaced by `code_cell` when complete. */

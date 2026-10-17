@@ -1,7 +1,11 @@
 import { ContextOverflowError, type ChatChunk, type ChatModelPort, type ChatRequest, type EmbeddingPort } from "@rlm/core";
+import { foldSystemPrompt } from "@rlm/contracts";
 import { ThinkSplitter } from "./think";
 
 const OVERFLOW_RE = /context.length|maximum context|too many tokens|context_length_exceeded|prompt is too long|exceeds the (model'?s )?context|input.*too long/i;
+/** Input limits that gateways relay with other statuses (DuckDuckGo's arrives as a 429, Cloudflare's as a 502).
+ * Narrow on purpose: a rate limit that mentions tokens per minute must stay a rate limit. */
+export const INPUT_LIMIT_RE = /ERR_INPUT_LIMIT|prompt (is )?too long \(max \d+|context_length_exceeded|maximum context length/i;
 
 export interface OpenAICompatConfig {
   baseUrl: string;
@@ -9,6 +13,8 @@ export interface OpenAICompatConfig {
   model: string;
   /** Fail when the server sends nothing for this long. */
   stallMs?: number;
+  /** Send the system prompt inside the first user message (the server drops the system role). */
+  systemAsUser?: boolean;
 }
 
 /** Aborts `ctl` when `touch()` isn't called for `ms`; the reason names the stall. */
@@ -54,19 +60,31 @@ export class ModelHttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** From the Retry-After header, when the server sent one. */
+    readonly retryAfterMs: number | null = null,
   ) {
     super(message);
     this.name = "ModelHttpError";
   }
 }
 
-export function httpError(what: string, status: number, body: string, cfg: OpenAICompatConfig): ModelHttpError {
+/** Retry-After is either delay-seconds or an HTTP date. */
+export function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | null {
+  if (!value) return null;
+  const secs = Number(value);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : Math.max(0, at - now);
+}
+
+export function httpError(what: string, status: number, body: string, cfg: OpenAICompatConfig, retryAfter?: string | null): ModelHttpError {
   const text = redactKey(body, cfg.apiKey).slice(0, 500);
+  const wait = parseRetryAfter(retryAfter);
   if (status === 401 || status === 403) {
     const why = cfg.apiKey ? "the server rejected the API key" : "the server requires an API key and none is set for this provider";
-    return new ModelHttpError(status, `${what} failed (${status}): ${why} (${cfg.baseUrl}). Check the key in Settings → Models → Providers.${text ? ` Server said: ${text}` : ""}`);
+    return new ModelHttpError(status, `${what} failed (${status}): ${why} (${cfg.baseUrl}). Check the key in Settings → Models → Providers.${text ? ` Server said: ${text}` : ""}`, wait);
   }
-  return new ModelHttpError(status, `${what} failed (${status}): ${text}`);
+  return new ModelHttpError(status, `${what} failed (${status}): ${text}`, wait);
 }
 
 export class OpenAICompatChat implements ChatModelPort {
@@ -78,7 +96,7 @@ export class OpenAICompatChat implements ChatModelPort {
   async *stream(req: ChatRequest): AsyncIterable<ChatChunk> {
     const body: Record<string, unknown> = {
       model: this.cfg.model,
-      messages: req.messages,
+      messages: this.cfg.systemAsUser ? foldSystemPrompt(req.messages) : req.messages,
       max_tokens: req.maxTokens,
       temperature: req.temperature ?? 0.3,
       stream: true,
@@ -101,10 +119,8 @@ export class OpenAICompatChat implements ChatModelPort {
       }
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
-        if (res.status === 400 || res.status === 413) {
-          if (OVERFLOW_RE.test(text)) throw new ContextOverflowError(text.slice(0, 500));
-        }
-        throw httpError("model request", res.status, text, this.cfg);
+        if (((res.status === 400 || res.status === 413) && OVERFLOW_RE.test(text)) || INPUT_LIMIT_RE.test(text)) throw new ContextOverflowError(redactKey(text, this.cfg.apiKey).slice(0, 500));
+        throw httpError("model request", res.status, text, this.cfg, res.headers.get("retry-after"));
       }
       yield* this.parse(res.body.getReader(), guard.touch, stalled);
     } finally {
@@ -127,7 +143,6 @@ export class OpenAICompatChat implements ChatModelPort {
       }
       const { done, value } = r;
       if (done) break;
-      touch();
       buf += decoder.decode(value, { stream: true });
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -137,6 +152,8 @@ export class OpenAICompatChat implements ChatModelPort {
         const data = line.slice(5).trim();
         if (data === "[DONE]") continue;
         let j: {
+          id?: string;
+          model?: string;
           choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null; reasoning?: string | null } }>;
           usage?: { prompt_tokens?: number; completion_tokens?: number };
           error?: { message?: string };
@@ -146,9 +163,12 @@ export class OpenAICompatChat implements ChatModelPort {
         } catch {
           continue;
         }
+        // Gateways (OmniRoute) send keepalive chunks while an upstream is stuck; they are not progress.
+        if (j.model === "keepalive" || j.id === "chatcmpl-keepalive") continue;
+        touch();
         if (j.error) {
           const m = redactKey(j.error.message ?? "stream error", this.cfg.apiKey);
-          if (OVERFLOW_RE.test(m)) throw new ContextOverflowError(m);
+          if (OVERFLOW_RE.test(m) || INPUT_LIMIT_RE.test(m)) throw new ContextOverflowError(m);
           throw new Error(m);
         }
         const d = j.choices?.[0]?.delta;
@@ -179,7 +199,7 @@ export class OpenAICompatEmbed implements EmbeddingPort {
     const guard = stallGuard(ctl, this.cfg.stallMs, `embedding request to ${this.cfg.baseUrl}`);
     try {
       const res = await post(this.cfg, "/embeddings", { model: this.cfg.model, input: texts }, ctl.signal);
-      if (!res.ok) throw httpError("embedding request", res.status, await res.text().catch(() => ""), this.cfg);
+      if (!res.ok) throw httpError("embedding request", res.status, await res.text().catch(() => ""), this.cfg, res.headers.get("retry-after"));
       const j = (await res.json()) as { data: Array<{ embedding: number[]; index: number }> };
       return j.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
     } catch (e) {

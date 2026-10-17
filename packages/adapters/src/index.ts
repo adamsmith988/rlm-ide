@@ -8,4 +8,5 @@ export * from "./llm/think";
 export * from "./llm/openai_compat";
 export * from "./llm/local_bridge";
 export * from "./llm/router";
+export * from "./llm/failover";
 export * from "./misc";

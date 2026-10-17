@@ -3,6 +3,7 @@ import type { TurnEvent } from "./events";
 import type { Settings } from "./settings";
 import type { LocalModelStatus } from "./models";
 import { HubDeployRequest, type HubStateView } from "./hub";
+import type { OmniRouteView } from "./omniroute";
 
 /** Every renderer -> main invoke channel and its payload schema. Main validates each payload. */
 export const IpcSchemas = {
@@ -100,6 +101,19 @@ export const IpcSchemas = {
   }),
   "hub:setToken": z.object({ token: z.string().max(500) }),
   "hub:log": z.object({ id: z.string().min(1) }),
+  "omniroute:state": z.object({}),
+  "omniroute:install": z.object({}),
+  "omniroute:service": z.object({ action: z.enum(["start", "stop", "restart"]) }),
+  "omniroute:catalog": z.object({}),
+  /** Adds a free provider to the gateway. The key goes to the gateway over stdin and is never stored by the IDE. */
+  "omniroute:connect": z.object({ provider: z.string().min(1).max(80).regex(/^[a-z0-9][a-z0-9._-]*$/), key: z.string().max(4000).default("") }),
+  "omniroute:disconnect": z.object({ connectionId: z.string().min(1).max(100) }),
+  /** Tests which free models answer. Empty = the auto-picked candidates. */
+  "omniroute:probe": z.object({ models: z.array(z.string().min(1).max(300)).max(60).default([]) }),
+  /** Makes these models, in this order, the agent and its backups (empty = test and auto-pick). */
+  "omniroute:setup": z.object({ models: z.array(z.string().min(1).max(300)).max(20).default([]) }),
+  /** Opens the gateway dashboard and copies its password to the clipboard. */
+  "omniroute:dashboard": z.object({}),
   "team:state": z.object({}),
   "team:profile": z.object({ name: z.string().max(100), email: z.string().max(200) }),
   "team:host": z.object({
@@ -269,6 +283,7 @@ export interface RlmApi {
   onBrowserState(cb: (s: BrowserState) => void): () => void;
   onTeamState(cb: (s: TeamStateView) => void): () => void;
   onHubState(cb: (s: HubStateView) => void): () => void;
+  onOmniRouteState(cb: (s: OmniRouteView) => void): () => void;
   /** A chat's task board changed (plan, progress, wake-up). */
   onTaskBoard(cb: (b: TaskBoardView) => void): () => void;
   /** Live hub events: notification, activity, changed. */

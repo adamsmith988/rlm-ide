@@ -5,6 +5,13 @@ export interface ModelLimits {
   maxOutputTokens: number;
 }
 
+/** The configured limits, narrowed to the window of the model actually serving now (never widened). */
+export function narrowLimits(base: ModelLimits, active: { contextLength: number | null; maxOutputTokens: number | null } | null | undefined): ModelLimits {
+  if (!active?.contextLength) return base;
+  const contextLength = Math.min(base.contextLength, active.contextLength);
+  return { contextLength, maxOutputTokens: Math.min(base.maxOutputTokens, active.maxOutputTokens ?? Math.floor(contextLength / 4)) };
+}
+
 export interface HistoryBudget {
   window: number;
   outputReserve: number;

@@ -30,6 +30,16 @@ export const BlockView = memo(function BlockView({ block, running, last }: { blo
       return <Thinking text={block.text} live={running && last} />;
     case "status":
       return <div className="pulse text-[12px] text-dim">{block.text}</div>;
+    case "switch":
+      return (
+        <div className="flex items-center gap-1.5 text-[11.5px] text-faint" data-testid="model-switch">
+          <ISpark size={11} className="shrink-0" />
+          <span className="min-w-0 truncate">
+            Switched to <span className="text-dim">{block.to}</span> · {block.from}: {block.reason}
+            {block.resumed ? " · continued the reply" : ""}
+          </span>
+        </div>
+      );
     case "cell":
       return <Cell b={block} />;
     case "tool":

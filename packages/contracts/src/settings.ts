@@ -40,6 +40,11 @@ export const RlmSettings = z.object({
   cellTimeoutSec: z.number().int().min(5).default(120),
   /** Cell output beyond this many chars is truncated with a marker. */
   cellOutputLimitChars: z.number().int().min(1024).default(16000),
+  /** A cell's output is also kept under this share of the model's window, so one output never crowds out the rest. */
+  cellOutputMaxShare: z.number().min(0.05).max(1).default(0.25),
+  /** When the full system prompt (protocol and tool documentation) would take more than this share of the model's
+   * window, the prompt lists tools compactly (signature and summary) and `help(tool)` in the REPL shows the rest. */
+  toolDocsMaxShare: z.number().min(0.05).max(1).default(0.25),
   /** REPL outputs older than this many steps are truncated first when over budget. */
   oldOutputKeepChars: z.number().int().min(200).default(1500),
   /** After a turn that edited files, ask the model once to check its work against the request before answering. */
@@ -80,6 +85,42 @@ export const ToolSettings = z.object({
   autoApplyEdits: z.boolean().default(false),
   actionCheck: z.boolean().default(false),
   shellTimeoutSec: z.number().int().min(1).default(300),
+});
+
+/** How a role's model chain behaves when a model fails mid-turn. */
+export const FailoverSettings = z.object({
+  enabled: z.boolean().default(true),
+  /** Cooldown after a transient failure (rate limit, 5xx, network, stall, empty reply) when the server gives no Retry-After. Doubles per consecutive failure. */
+  cooldownSec: z.number().int().min(1).default(30),
+  maxCooldownSec: z.number().int().min(10).default(900),
+  /** Cooldown for failures a retry will not fix soon (bad key, unknown model, rejected request). */
+  hardFailureCooldownSec: z.number().int().min(10).default(1800),
+  /** When every model in the chain is cooling down, the turn waits for the first to recover instead of failing, for at most this long. */
+  waitForRecoverySec: z.number().int().min(0).default(900),
+  /** A model that fails after it started replying hands the partial reply to the next model, which continues it. */
+  continueMidReply: z.boolean().default(true),
+  /** A reply with no text and no reasoning counts as a failure (free gateways sometimes return empty turns). */
+  emptyReplyIsFailure: z.boolean().default(true),
+});
+
+/** IDE-managed OmniRoute gateway (free models across many providers). */
+export const OmniRouteSettings = z.object({
+  /** Start the managed gateway with the app once it is installed. */
+  autoStart: z.boolean().default(true),
+  port: z.number().int().min(1024).max(65535).default(20128),
+  /** Name of the gateway combo kept in sync with the chosen free models that honour system prompts, for other apps. */
+  comboName: z.string().min(1).default("rlm-free"),
+  /** Probe timeout when testing which free models answer. */
+  probeTimeoutSec: z.number().int().min(5).default(90),
+  /** How many working free models the auto-setup keeps in the chain. */
+  maxChainModels: z.number().int().min(1).max(20).default(6),
+  /** Web-playground providers accept far less input than the gateway advertises. The test sends a prompt this long;
+   * a model that refuses it is narrowed down to its real limit, which becomes its context window. */
+  windowProbeChars: z.number().int().min(4000).default(40000),
+  /** A model whose real input limit is below this cannot hold the agent's instructions and work, so it is not chained. */
+  minAgentInputChars: z.number().int().min(2000).default(12000),
+  /** npm package spec installed into the app data folder. */
+  packageSpec: z.string().min(1).default("omniroute@latest"),
 });
 
 export const LocalInferenceSettings = z.object({
@@ -125,8 +166,12 @@ export const Settings = z.object({
       agent: z.string().default(BUILTIN.agentModelId),
       summarizer: z.string().default(""),
       embed: z.string().default(BUILTIN.embedModelId),
+      /** Tried in order when the agent model fails; the summarizer follows the same chain when it has no model of its own. */
+      agentFallbacks: z.array(z.string()).default([]),
     })
     .default({}),
+  failover: FailoverSettings.default({}),
+  omniroute: OmniRouteSettings.default({}),
   compact: CompactSettings.default({}),
   rlm: RlmSettings.default({}),
   memory: MemorySettings.default({}),
@@ -142,6 +187,8 @@ export type CompactSettings = z.infer<typeof CompactSettings>;
 export type RlmSettings = z.infer<typeof RlmSettings>;
 export type MemorySettings = z.infer<typeof MemorySettings>;
 export type ToolSettings = z.infer<typeof ToolSettings>;
+export type FailoverSettings = z.infer<typeof FailoverSettings>;
+export type OmniRouteSettings = z.infer<typeof OmniRouteSettings>;
 
 export function defaultSettings(): Settings {
   return Settings.parse({});
@@ -155,6 +202,8 @@ export function repairRoles(s: Settings): Settings {
   if (!has(roles.agent, "chat")) roles.agent = pick("chat", BUILTIN.agentModelId);
   if (roles.summarizer && !has(roles.summarizer, "chat")) roles.summarizer = "";
   if (roles.embed && !has(roles.embed, "embed")) roles.embed = pick("embed", BUILTIN.embedModelId);
-  const same = roles.agent === s.roles.agent && roles.summarizer === s.roles.summarizer && roles.embed === s.roles.embed;
+  roles.agentFallbacks = [...new Set(roles.agentFallbacks.filter((id) => id !== roles.agent && has(id, "chat")))];
+  const sameFallbacks = roles.agentFallbacks.length === s.roles.agentFallbacks.length && roles.agentFallbacks.every((id, i) => id === s.roles.agentFallbacks[i]);
+  const same = roles.agent === s.roles.agent && roles.summarizer === s.roles.summarizer && roles.embed === s.roles.embed && sameFallbacks;
   return same ? s : { ...s, roles };
 }

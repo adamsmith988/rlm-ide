@@ -4,12 +4,14 @@ import { api, call, errText } from "../../api";
 import { useApp } from "../../store";
 import { IDownload, IPlus, ITrash } from "../../ui/icons";
 import { Bytes, Num, Row, Section, Select, Text } from "./fields";
+import { FailoverSection, FreeModelsSection } from "./FreeModelsSection";
 
 type Progress = { modelId: string; received: number; total: number; file: string; done: boolean; error?: string };
 
 const PRESETS: Array<{ label: string; baseUrl: string; needsKey: boolean }> = [
   { label: "OpenAI", baseUrl: "https://api.openai.com/v1", needsKey: true },
   { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsKey: true },
+  { label: "OmniRoute", baseUrl: "http://localhost:20128/v1", needsKey: true },
   { label: "Ollama", baseUrl: "http://localhost:11434/v1", needsKey: false },
   { label: "LM Studio", baseUrl: "http://localhost:1234/v1", needsKey: false },
   { label: "vLLM", baseUrl: "http://localhost:8000/v1", needsKey: false },
@@ -36,6 +38,9 @@ export function ModelsSection({ s }: { s: Settings }) {
           <Select value={s.roles.embed} width={260} options={embed.map((m) => [m.id, m.label])} onChange={(v) => setRole("embed", v)} />
         </Row>
       </Section>
+
+      <FreeModelsSection />
+      <FailoverSection s={s} />
 
       <ModelManager />
 
@@ -267,7 +272,7 @@ function Providers({ s }: { s: Settings }) {
           <Row label={pr.label} hint={pr.kind === "local_onnx" ? "Runs on this machine" : pr.baseUrl}>
             {pr.kind === "openai_compat" && (
               <>
-                <KeyInput providerId={pr.id} hasKey={pr.hasKey} />
+                {pr.managed ? <span className="text-[11.5px] text-faint">Managed in Free models</span> : <KeyInput providerId={pr.id} hasKey={pr.hasKey} />}
                 <button
                   className="iconbtn"
                   title="Remove provider"

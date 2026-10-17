@@ -12,6 +12,8 @@ export const ProviderConfig = z.object({
   baseUrl: z.string().default(""),
   /** True when an API key is stored in the secret store under `provider:<id>`. */
   hasKey: z.boolean().default(false),
+  /** Set when the IDE runs this provider's server itself. */
+  managed: z.enum(["omniroute"]).optional(),
 });
 export type ProviderConfig = z.infer<typeof ProviderConfig>;
 
@@ -27,8 +29,27 @@ export const ModelConfig = z.object({
   maxOutputTokens: z.number().int().positive().nullable().default(null),
   /** Embedding dimension (embed models only). */
   dim: z.number().int().positive().nullable().default(null),
+  /** The server drops the system role (some free web-playground providers); the agent's instructions, memory and
+   * task board then travel at the top of the first user message instead. */
+  systemAsUser: z.boolean().optional(),
 });
 export type ModelConfig = z.infer<typeof ModelConfig>;
+
+/** Conservative token estimate. Code and non-English text tokenize denser than prose, so we
+ * assume fewer characters per token than the usual ~4 to avoid underestimating. */
+export const CHARS_PER_TOKEN = 3.2;
+
+type Msg = { role: "system" | "user" | "assistant"; content: string };
+
+/** Moves every system message into the first user message, for servers that ignore the system role. */
+export function foldSystemPrompt<M extends Msg>(messages: M[]): Msg[] {
+  const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+  const rest: Msg[] = messages.filter((m) => m.role !== "system");
+  if (!system) return rest;
+  const preamble = `<instructions>\n${system}\n</instructions>`;
+  if (rest[0]?.role === "user") return [{ role: "user", content: `${preamble}\n\n${rest[0].content}` }, ...rest.slice(1)];
+  return [{ role: "user", content: preamble }, ...rest];
+}
 
 export const ModelRole = z.enum(["agent", "summarizer", "embed"]);
 export type ModelRole = z.infer<typeof ModelRole>;
