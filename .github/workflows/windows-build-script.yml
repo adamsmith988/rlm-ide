@@ -36,12 +36,24 @@ jobs:
         with:
           sparse-checkout: scripts/build-windows.ps1
           sparse-checkout-cone-mode: false
-      - name: build-windows.ps1 (standalone)
-        shell: ${{ matrix.shell }}
+      - name: Copy the script out of the repo, as a user would download it
+        shell: pwsh
+        run: Copy-Item scripts\build-windows.ps1 "$env:RUNNER_TEMP\build-windows.ps1"
+      # `shell:` cannot take an expression, so each PowerShell gets its own step.
+      - name: build-windows.ps1 in Windows PowerShell 5.1
+        if: matrix.shell == 'powershell'
+        shell: powershell
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          Copy-Item scripts\build-windows.ps1 "$env:RUNNER_TEMP\build-windows.ps1"
+          & "$env:RUNNER_TEMP\build-windows.ps1" -ProjectDir "$env:RUNNER_TEMP\rlm-ide" -RepoUrl "${{ github.server_url }}/${{ github.repository }}.git" -Branch "${{ github.ref_name }}" -LogDir "$env:RUNNER_TEMP\build-logs" ${{ matrix.args }}
+          exit $LASTEXITCODE
+      - name: build-windows.ps1 in PowerShell 7
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           & "$env:RUNNER_TEMP\build-windows.ps1" -ProjectDir "$env:RUNNER_TEMP\rlm-ide" -RepoUrl "${{ github.server_url }}/${{ github.repository }}.git" -Branch "${{ github.ref_name }}" -LogDir "$env:RUNNER_TEMP\build-logs" ${{ matrix.args }}
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
