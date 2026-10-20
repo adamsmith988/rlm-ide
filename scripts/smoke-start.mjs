@@ -3,7 +3,7 @@
 // the window opens the workspace, the terminal (node-pty) runs a command, memory (embedder + sqlite-vec) stores
 // and recalls a fact, and an agent turn runs a Python REPL cell in the bundled runtime. The agent talks to a
 // local mock model, so no network, keys or downloads are needed.
-// Usage: node scripts/smoke-start.mjs [--exe "path/to/RLM IDE.exe"] [--out dir] [--timeout-sec 300]
+// Usage: node scripts/smoke-start.mjs [--exe "path/to/RLM IDE.exe"] [--out dir] [--timeout-sec 300] [--platform win32]
 import http from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -15,6 +15,8 @@ const arg = (name, fallback) => (process.argv.includes(`--${name}`) ? process.ar
 const exe = arg("exe", null);
 const out = path.resolve(arg("out", path.join(REPO, "evals", "results", `smoke-${new Date().toISOString().replace(/[:.]/g, "-")}`)));
 const timeoutMs = Number(arg("timeout-sec", "300")) * 1000;
+// The platform the app runs on; differs from this script's when a Windows build runs under Wine.
+const platform = arg("platform", process.platform);
 const version = JSON.parse(readFileSync(path.join(REPO, "apps", "desktop", "package.json"), "utf8")).version;
 
 const TASK = "RLM_SMOKE_TASK: run one REPL cell that prints a marker, then report it.";
@@ -77,12 +79,17 @@ try {
   check("the window opens the workspace and the composer is ready", true, `${((Date.now() - t0) / 1000).toFixed(1)} s`);
 
   const info = await app.cdp.invoke("app:info");
-  check("the app reports its version and platform", info.version === version && info.platform === process.platform, `${info.version} on ${info.platform}, sandbox ${info.sandbox?.mode}`);
+  check("the app reports its version and platform", info.version === version && info.platform === platform, `${info.version} on ${info.platform}, sandbox ${info.sandbox?.mode}`);
 
   await app.cdp.eval("window.__smokePty = ''; window.rlm.onPtyData((m) => { window.__smokePty += m.data; }); true");
   const ptyId = await app.cdp.invoke("pty:create", { cols: 120, rows: 30 });
   await sleep(1500);
-  await app.cdp.invoke("pty:write", { id: ptyId, data: `${process.platform === "win32" ? "echo RLM_SMOKE_PTY_$(6*7)" : "echo RLM_SMOKE_PTY_$((6*7))"}\r` });
+  // Windows: the first line works in PowerShell, the second in cmd.exe (the fallback shell); each prints the marker
+  // only when actually run, never as the echoed command.
+  for (const line of platform === "win32" ? ["echo RLM_SMOKE_PTY_$(6*7)", "echo RLM_SMOKE_PTY_^42"] : ["echo RLM_SMOKE_PTY_$((6*7))"]) {
+    await app.cdp.invoke("pty:write", { id: ptyId, data: `${line}\r` });
+    await sleep(500);
+  }
   let pty = "";
   for (let i = 0; i < 40 && !pty.includes("RLM_SMOKE_PTY_42"); i++) {
     await sleep(500);

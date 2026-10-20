@@ -1,7 +1,18 @@
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
+import path from "node:path";
 
 const require = createRequire(__filename);
+
+/** First existing of: Windows PowerShell, PowerShell 7 on PATH, then the command processor. A bare "powershell.exe"
+ * fails with "File not found" when PATH is trimmed or PowerShell is not installed (e.g. Server Core, Wine). */
+export function windowsShell(env: NodeJS.ProcessEnv = process.env, exists: (p: string) => boolean = existsSync): string {
+  const root = env.SystemRoot ?? env.windir ?? "C:\\Windows";
+  const onPath = (exe: string) => (env.PATH ?? env.Path ?? "").split(";").filter(Boolean).map((d) => path.win32.join(d, exe));
+  const candidates = [path.win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ...onPath("pwsh.exe"), ...onPath("powershell.exe"), env.ComSpec ?? "", path.win32.join(root, "System32", "cmd.exe")];
+  return candidates.find((c) => c && exists(c)) ?? "cmd.exe";
+}
 
 interface IPty {
   pid: number;
@@ -24,7 +35,7 @@ export class PtyService {
 
   create(cwd: string, cols: number, rows: number): string {
     const pty = require("node-pty") as { spawn(file: string, args: string[], opts: Record<string, unknown>): IPty };
-    const shell = process.platform === "win32" ? "powershell.exe" : process.env.SHELL || "/bin/bash";
+    const shell = process.platform === "win32" ? windowsShell() : process.env.SHELL || "/bin/bash";
     const p = pty.spawn(shell, [], { name: "xterm-256color", cols, rows, cwd: cwd || os.homedir(), env: { ...process.env, TERM: "xterm-256color" } });
     const id = `pty${++this.n}`;
     this.ptys.set(id, p);

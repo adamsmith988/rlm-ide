@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
@@ -16,6 +17,7 @@ export default defineConfig({
           "inference-cpu": resolve(__dirname, "src/inference-cpu/index.ts"),
         },
         external: ["@huggingface/transformers", "node-pty", "sqlite-vec", "onnxruntime-node", "electron-updater"],
+        output: { intro: readFileSync(resolve(__dirname, "src/main/stdio_guard.cjs"), "utf8") },
       },
     },
   },
