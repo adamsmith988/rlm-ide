@@ -29,3 +29,5 @@ evals/.runtimes/
 *.onnx_data
 .venv/
 venv/
+# portable Node.js / pnpm from scripts/build-windows.ps1
+.tools/

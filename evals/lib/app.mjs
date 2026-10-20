@@ -13,18 +13,20 @@ export function electronBinary() {
   return createRequire(path.join(DESKTOP, "package.json"))("electron");
 }
 
-/** Launches the built IDE (apps/desktop/out) with an isolated profile and drives it over CDP. */
+/** Launches the built IDE (apps/desktop/out, or a packaged executable via `exe`) with an isolated profile and drives it over CDP. */
 export class IdeApp {
-  constructor({ userData, workspace, settings, port = 9400 + Math.floor(Math.random() * 400), logFile }) {
-    this.opts = { userData, workspace, settings, port, logFile };
+  constructor({ userData, workspace, settings, port = 9400 + Math.floor(Math.random() * 400), logFile, exe = null }) {
+    this.opts = { userData, workspace, settings, port, logFile, exe };
   }
 
   async start() {
-    if (!existsSync(path.join(DESKTOP, "out/main/index.js"))) throw new Error("build the app first: pnpm --filter @rlm/desktop build");
-    const args = [`--remote-debugging-port=${this.opts.port}`, "."];
+    const { exe } = this.opts;
+    if (exe ? !existsSync(exe) : !existsSync(path.join(DESKTOP, "out/main/index.js"))) throw new Error(exe ? `no executable at ${exe}` : "build the app first: pnpm --filter @rlm/desktop build");
+    const args = [`--remote-debugging-port=${this.opts.port}`];
+    if (!exe) args.push(".");
     if (process.platform === "linux") args.unshift("--no-sandbox");
-    this.proc = spawn(electronBinary(), args, {
-      cwd: DESKTOP,
+    this.proc = spawn(exe ?? electronBinary(), args, {
+      cwd: exe ? path.dirname(exe) : DESKTOP,
       env: {
         ...process.env,
         RLM_USER_DATA: this.opts.userData,
@@ -125,6 +127,12 @@ export class IdeApp {
 
   async stop() {
     this.cdp?.close();
+    if (process.platform === "win32" && this.proc?.exitCode === null) {
+      // Electron's helper processes outlive a killed main process on Windows; end the whole tree.
+      spawn("taskkill", ["/PID", String(this.proc.pid), "/T", "/F"], { stdio: "ignore" });
+      await Promise.race([new Promise((r) => this.proc.once("exit", r)), sleep(10000)]);
+      return;
+    }
     if (this.proc && this.proc.exitCode === null) {
       this.proc.kill("SIGTERM");
       await Promise.race([new Promise((r) => this.proc.once("exit", r)), sleep(5000)]);

@@ -1,0 +1,52 @@
+name: windows build script
+
+# Runs scripts/build-windows.ps1 the way a user would: the script on its own, on a clean Windows machine,
+# getting the project, the tools, the venv, building, testing start-up, and building and installing the installer.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - scripts/build-windows.ps1
+      - scripts/smoke-start.mjs
+      - scripts/fetch-*.mjs
+      - evals/lib/**
+      - apps/desktop/electron-builder.yml
+      - .github/workflows/windows-build-script.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1, portable Node.js
+            shell: powershell
+            args: -PortableNode -TestInstaller
+          - name: PowerShell 7, installed Node.js
+            shell: pwsh
+            args: -TestInstaller
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/build-windows.ps1
+          sparse-checkout-cone-mode: false
+      - name: build-windows.ps1 (standalone)
+        shell: ${{ matrix.shell }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Copy-Item scripts\build-windows.ps1 "$env:RUNNER_TEMP\build-windows.ps1"
+          & "$env:RUNNER_TEMP\build-windows.ps1" -ProjectDir "$env:RUNNER_TEMP\rlm-ide" -RepoUrl "${{ github.server_url }}/${{ github.repository }}.git" -Branch "${{ github.ref_name }}" -LogDir "$env:RUNNER_TEMP\build-logs" ${{ matrix.args }}
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs-${{ matrix.shell }}
+          path: ${{ runner.temp }}/build-logs
+          if-no-files-found: ignore
