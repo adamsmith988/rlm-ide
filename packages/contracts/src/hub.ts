@@ -4,6 +4,10 @@ import { z } from "zod";
 export const HubSettings = z.object({
   /** An existing llama.cpp checkout or install (folder holding llama-server); empty = the one the IDE builds. */
   llamaCppDir: z.string().default(""),
+  /** GitHub repository llama.cpp is downloaded (prebuilt) or cloned (source build) from. */
+  llamaCppRepo: z.string().regex(/^[\w.-]+\/[\w.-]+$/).default("ggml-org/llama.cpp"),
+  /** Release tag to download, such as b11796; empty = the newest build that has an archive for this system. */
+  llamaCppRelease: z.string().default(""),
   /** Python used for deployment tools; empty = the IDE's own environment (created on first use). */
   python: z.string().default(""),
   /** Files downloaded at the same time. */
@@ -110,7 +114,7 @@ export interface DeployTargetView {
   sources: HubOption[];
   /** Quantizations per source id. */
   quantizations: Record<string, HubOption[]>;
-  devices: Array<"cpu" | "cuda">;
+  devices: Array<"cpu" | "cuda" | "gpu">;
   kinds: HubKind[];
   dtypes: string[];
 }
@@ -121,7 +125,8 @@ export const HubDeployRequest = z.object({
   source: z.string().min(1),
   quant: z.string().min(1),
   kind: z.enum(["chat", "embed"]),
-  device: z.enum(["cpu", "cuda"]).default("cpu"),
+  /** "gpu": llama.cpp's Vulkan or Metal build. */
+  device: z.enum(["cpu", "cuda", "gpu"]).default("cpu"),
   dtype: z.string().default("auto"),
   contextLength: z.number().int().min(0).default(0),
   trustRemoteCode: z.boolean().default(false),
@@ -181,8 +186,9 @@ export interface HubToolsView {
     server: string | null;
     quantize: string | null;
     convert: string | null;
-    backend: "cpu" | "cuda" | null;
+    backend: "cpu" | "cuda" | "vulkan" | "metal" | null;
     version: string | null;
+    error: string | null;
     quantTypes: HubOption[];
     convertArchitectures: number;
   };

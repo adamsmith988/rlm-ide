@@ -1,0 +1,1 @@
+You reasoned for about {{tokens}} tokens in your last step without writing a `repl` block or an answer, so the IDE stopped you. Do not start that reasoning over. Take the next concrete step now: write one short `repl` block (for example, look at the file, data or error you were unsure about), or give your answer if you already can.

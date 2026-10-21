@@ -87,7 +87,8 @@ export function deployTargets(m: ModelRecord, t: ToolsSnapshot): DeployTargetVie
       needs,
       sources,
       quantizations,
-      devices: l.backend === "cuda" ? ["cpu", "cuda"] : ["cpu"],
+      // The GPU first: it is what the user installed the GPU build for.
+      devices: l.backend === "cuda" ? ["cuda", "cpu"] : l.backend === "vulkan" || l.backend === "metal" ? ["gpu", "cpu"] : ["cpu"],
       kinds,
       dtypes: [],
     });
@@ -189,6 +190,7 @@ export function planDeployment(m: ModelRecord, req: HubDeployRequest, t: ToolsSn
     const quantize = (src: string, out: string, type: string, requant: boolean, imatrix?: string): StepSpec => ({
       label: `quantize to ${type}`,
       cmd: l.quantize!,
+      env: l.env,
       args: [...(requant ? ["--allow-requantize"] : []), ...(imatrix ? ["--imatrix", imatrix] : []), src, out, type],
       output: out,
       recover: imatrix || !l.imatrix ? undefined : (tail) => (/imatrix|importance matrix/i.test(tail) ? withImatrix(src, out, type, requant) : null),
@@ -196,7 +198,7 @@ export function planDeployment(m: ModelRecord, req: HubDeployRequest, t: ToolsSn
     const withImatrix = (src: string, out: string, type: string, requant: boolean): StepSpec[] => {
       const dat = path.join(cache, `${base}.imatrix.dat`);
       return [
-        { label: "compute importance matrix", cmd: l.imatrix!, args: ["-m", src, "-f", calibrationFile(m, workDir), "-o", dat, "-c", "256", "--chunks", "64"], output: dat },
+        { label: "compute importance matrix", cmd: l.imatrix!, env: l.env, args: ["-m", src, "-f", calibrationFile(m, workDir), "-o", dat, "-c", "256", "--chunks", "64"], output: dat },
         quantize(src, out, type, requant, dat),
       ];
     };
@@ -235,9 +237,9 @@ export function planDeployment(m: ModelRecord, req: HubDeployRequest, t: ToolsSn
           "--alias", served,
           "-c", String(ctx),
           ...(req.kind === "embed" ? ["--embeddings", "-b", String(ctx), "-ub", String(ctx)] : ["--jinja"]),
-          ...(req.device === "cuda" ? ["-ngl", "999"] : ["-ngl", "0"]),
+          ...(req.device === "cpu" ? ["-ngl", "0"] : ["-ngl", "999"]),
         ],
-        env: {},
+        env: { ...l.env },
       }),
     };
   }

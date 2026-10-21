@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, net, protocol, shell } 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { BUILTIN, IpcSchemas, type HubDeployRequest, type IpcChannel, type LocalModelStatus, type Settings } from "@rlm/contracts";
 import { bytesOnDisk, downloadModel, importModel, isInstalled, loadManifest, totalBytes, type ModelManifest } from "@rlm/inference/src/model_manager";
 import { FsService } from "./fs_service";
@@ -14,6 +14,7 @@ import { PreviewService } from "./preview_service";
 import { paths } from "./paths";
 import { PtyService } from "./pty_service";
 import { SecretStore, SettingsStore } from "./settings_store";
+import { canonicalFolder, FolderLocks, folderFromArgv, secondarySessionDir } from "./instance";
 import { TeamManager } from "./team_manager";
 import { HubService, OmniRouteService } from "@rlm/hub";
 
@@ -24,7 +25,23 @@ if (process.platform === "linux") {
   // Dawn hides shader-f16 on NVIDIA Vulkan by default; the q4f16 model needs it.
   app.commandLine.appendSwitch("enable-dawn-features", "vulkan_enable_f16_on_nvidia");
 }
-if (process.env.RLM_USER_DATA) app.setPath("userData", process.env.RLM_USER_DATA);
+if (process.platform === "win32") {
+  // shader-f16 on D3D12 needs the DXC compiler (dxcompiler.dll ships with Electron); without it the q4f16 model
+  // cannot run on the GPU and falls back to the CPU.
+  app.commandLine.appendSwitch("enable-dawn-features", "use_dxc");
+}
+// The built-in model runs in a hidden window. Chromium lowers the priority of hidden and occluded windows and throttles
+// their task queue, and every generated token waits on a GPU readback delivered through that queue.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-background-timer-throttling");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+// setPath throws on a relative or drive-less path (a Unix-style path on Windows); resolve it against the current drive.
+if (process.env.RLM_USER_DATA) app.setPath("userData", path.resolve(process.env.RLM_USER_DATA));
+// Any number of copies may run on one profile. The first runs the shared services (OmniRoute, Models Hub
+// deployments, team hosting); each later copy gets its own Chromium session folder, which Windows locks per process.
+const primary = app.requestSingleInstanceLock();
+if (!primary) app.setPath("sessionData", secondarySessionDir(app.getPath("userData")));
+const folderLocks = new FolderLocks(path.join(app.getPath("userData"), "locks"));
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "rlm-model", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
@@ -42,7 +59,8 @@ const pty = new PtyService(
 );
 let status: Record<string, unknown> = { memory: "online", kernel: "idle", model: "", contextLength: null };
 let manifest: ModelManifest = {};
-let autoOpen: string | null = process.env.RLM_OPEN_WORKSPACE ?? null;
+const argvFolder = folderFromArgv(process.argv, process.cwd(), app.getAppPath());
+let autoOpen: string | null = process.env.RLM_OPEN_WORKSPACE || argvFolder;
 const downloads = new Map<string, AbortController>();
 const preview = new PreviewService(path.join(app.getPath("userData"), "attachments"));
 const browser = new BrowserService(
@@ -66,6 +84,7 @@ const omniroute = new OmniRouteService({
   dir: path.join(app.getPath("userData"), "omniroute"),
   settings: () => settings.get(),
   updateSettings: (patch) => settings.update(patch as Record<string, unknown>),
+  follower: () => !primary,
   secrets,
   emit: (s) => send("omniroute:state", s),
   log: (msg) => console.warn(`[omniroute] ${msg}`),
@@ -121,6 +140,24 @@ function loadPage(win: BrowserWindow, page: string): void {
   const devUrl = process.env.ELECTRON_RENDERER_URL;
   if (!app.isPackaged && devUrl) void win.loadURL(`${devUrl}/${page}`);
   else void win.loadFile(path.join(__dirname, "../renderer", page));
+}
+
+/** Model files, deployments and runtimes belong to the first copy of the IDE; two copies writing them would collide. */
+function primaryOnly(what: string): void {
+  if (!primary) throw new Error(`${what} are managed by the first RLM IDE window that was opened. Use that window for this.`);
+}
+
+/** Starts another copy of the IDE with the same arguments (minus a debugging port and a folder), on `root` if given. */
+function openNewWindow(root: string | null): void {
+  const args = process.argv
+    .slice(1)
+    .filter((a) => !a.startsWith("--remote-debugging-port") && !(argvFolder && !a.startsWith("-") && path.resolve(a) === argvFolder));
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.RLM_OPEN_WORKSPACE;
+  if (root) env.RLM_OPEN_WORKSPACE = root;
+  const child = spawn(process.execPath, args, { cwd: process.cwd(), env, detached: true, stdio: "ignore", windowsHide: false });
+  child.on("error", (e) => console.warn(`[app] new window failed: ${String(e)}`));
+  child.unref();
 }
 
 function pushSettingsToOrchestrator(s: Settings): void {
@@ -277,12 +314,20 @@ async function handle(channel: IpcChannel, payload: Record<string, unknown>): Pr
       return root;
     }
     case "dialog:openFolder": {
-      const r = await dialog.showOpenDialog(mainWindow!, { properties: ["openDirectory", "createDirectory"] });
-      return r.canceled ? null : r.filePaths[0];
+      const opts: Electron.OpenDialogOptions = { title: "Open folder", properties: ["openDirectory", "createDirectory"] };
+      const r = mainWindow ? await dialog.showOpenDialog(mainWindow, opts) : await dialog.showOpenDialog(opts);
+      return r.canceled ? null : (r.filePaths[0] ?? null);
+    }
+    case "app:newWindow": {
+      openNewWindow(payload.root ? String(payload.root) : null);
+      return true;
     }
     case "workspace:open": {
-      const root = path.resolve(String(payload.root));
-      if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error(`not a folder: ${root}`);
+      const asked = path.resolve(String(payload.root));
+      if (!existsSync(asked) || !statSync(asked).isDirectory()) throw new Error(`not a folder: ${asked}`);
+      const root = canonicalFolder(asked);
+      const other = folderLocks.acquire(root);
+      if (other !== null) throw new Error(`${root} is already open in another RLM IDE window (process ${other}). Switch to that window, or close the folder there first.`);
       fsService.open(root);
       await orch.call("workspace:set", { root });
       const recent = [root, ...settings.get().recentWorkspaces.filter((r) => r !== root)].slice(0, 10);
@@ -378,23 +423,29 @@ async function handle(channel: IpcChannel, payload: Record<string, unknown>): Pr
     case "hub:lookup":
       return hub.lookup(String(payload.repo), String(payload.revision ?? ""));
     case "hub:download":
+      primaryOnly("Model downloads");
       return hub.download(String(payload.repo), String(payload.revision ?? ""), payload.files as string[]);
     case "hub:job":
+      primaryOnly("Download jobs");
       return hub.jobAction(String(payload.id), payload.action as "pause" | "resume" | "cancel" | "remove");
     case "hub:deleteModel":
+      primaryOnly("Deleting models");
       return hub.deleteModel(String(payload.modelId));
     case "hub:targets":
       return hub.targets(String(payload.modelId));
     case "hub:deploy":
+      primaryOnly("Deployments");
       return hub.deploy(payload as unknown as HubDeployRequest);
     case "hub:deployment": {
       const id = String(payload.id);
+      if (payload.action !== "test") primaryOnly("Deployments");
       if (payload.action === "start") return hub.start(id);
       if (payload.action === "stop") return hub.stop(id);
       if (payload.action === "test") return hub.test(id);
       return hub.removeDeployment(id);
     }
     case "hub:tools":
+      if (payload.action !== "probe") primaryOnly("Installing runtimes");
       return hub.toolsAction(payload.action as "probe", payload.packages as string[], payload.backend as "cpu" | "cuda", payload.env as "main" | "onnx");
     case "hub:setToken":
       return hub.setToken(String(payload.token));
@@ -536,15 +587,24 @@ app.whenReady().then(async () => {
     vecExtension: paths.vecExtension(),
     settings: settings.get(),
     keys: secrets.all(),
+    recoverTurns: primary,
   });
+  let devices = JSON.stringify([settings.get().local.preferredDevice, settings.get().local.cpuThreads]);
   settings.onChange((s) => {
+    const now = JSON.stringify([s.local.preferredDevice, s.local.cpuThreads]);
+    if (now !== devices) {
+      devices = now;
+      inference.devicesChanged();
+      orch.post({ kind: "models-changed" });
+    }
     secrets.pruneProviders(s.providers.map((p) => p.id));
     pushSettingsToOrchestrator(s);
     send("settings", s);
   });
+  settings.watch();
   createWindow();
-  void team.boot();
-  void hub.boot().catch((e: unknown) => console.warn(`[hub] boot failed: ${String(e)}`));
+  void team.boot({ host: primary });
+  void hub.boot({ follower: !primary }).catch((e: unknown) => console.warn(`[hub] boot failed: ${String(e)}`));
   void omniroute.boot().catch((e: unknown) => console.warn(`[omniroute] boot failed: ${String(e)}`));
   if (app.isPackaged && settings.get().autoUpdate) {
     import("electron-updater")
@@ -566,11 +626,14 @@ function stopServices(): void {
   hub.close();
   omniroute.close();
   void team.close();
+  folderLocks.releaseAll();
 }
 
+// Closing the window stops the orchestrator and services, so the app quits on macOS too rather than staying in the
+// dock with nothing behind a new window.
 app.on("window-all-closed", () => {
   stopServices();
-  if (process.platform !== "darwin") app.quit();
+  app.quit();
 });
 app.on("will-quit", stopServices);
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, () => app.quit());

@@ -64,8 +64,8 @@ function MemorySection({ s }: { s: Settings }) {
       <Row label="Enable memory" hint="When off, nothing is stored or recalled.">
         <Toggle value={m.enabled} onChange={(v) => set({ enabled: v })} />
       </Row>
-      <Row label="Long-term scope" hint="Share facts across all projects, or keep them per workspace.">
-        <Select value={m.longTermScope} options={[["user", "All projects"], ["workspace", "Per workspace"]]} onChange={(v) => set({ longTermScope: v })} />
+      <Row label="Long-term scope" hint="Per project: facts about you follow you everywhere, facts about a project stay in that project. All projects: every fact is recalled everywhere.">
+        <Select value={m.longTermScope} options={[["workspace", "Per project"], ["user", "All projects"]]} onChange={(v) => set({ longTermScope: v })} />
       </Row>
       <Row label="Only learn what I said" hint="Facts must be grounded in your messages, not the assistant's.">
         <Toggle value={m.factRequireUserGrounding} onChange={(v) => set({ factRequireUserGrounding: v })} />
@@ -162,6 +162,20 @@ function AgentSection({ s }: { s: Settings }) {
           <Num value={r.cellOutputLimitChars} min={1024} onChange={(v) => setR({ cellOutputLimitChars: v ?? 16000 })} suffix="chars" width={110} />
         </Row>
       </Section>
+      <Section title="Runaway replies" hint="A step whose reasoning runs past these limits, or that keeps repeating itself, is stopped and the model is told to act.">
+        <Row label="Reasoning per step" hint="Tokens of reasoning before the step is stopped.">
+          <Num value={r.thinkingMaxTokens} min={256} onChange={(v) => setR({ thinkingMaxTokens: v ?? 8192 })} suffix="tokens" width={110} />
+        </Row>
+        <Row label="Reasoning time per step" hint="Slow local models reach the token limit only after a long time.">
+          <Num value={r.thinkingMaxSec} min={10} onChange={(v) => setR({ thinkingMaxSec: v ?? 180 })} suffix="sec" />
+        </Row>
+        <Row label="Stops in a row before giving up">
+          <Num value={r.maxCutsInARow} min={1} max={20} onChange={(v) => setR({ maxCutsInARow: v ?? 3 })} />
+        </Row>
+        <Row label="Hand large messages to the REPL" hint="Messages larger than this share of the context window go to the REPL as user_message; the agent reads them in parts.">
+          <Ratio value={r.largeInputShare} onChange={(v) => setR({ largeInputShare: v })} min={0.05} max={0.9} />
+        </Row>
+      </Section>
       <Section title="Compaction" hint="When history fills its share of the context window, older turns are folded into a structured checkpoint.">
         <Row label="History share of window">
           <Ratio value={c.historyShare} onChange={(v) => setC({ historyShare: v })} min={0.1} max={0.95} />
@@ -192,6 +206,12 @@ function LocalSection({ s }: { s: Settings }) {
     <Section title="Local inference" hint="Settings for the built-in FrogNano model.">
       <Row label="Device" hint={inf ? `Current: ${inf.device} · ${inf.status}${inf.detail ? ` — ${inf.detail}` : ""}` : "Starts on first use."}>
         <Select value={l.preferredDevice} options={[["auto", "Auto (GPU, then CPU)"], ["webgpu", "GPU (WebGPU)"], ["cpu", "CPU"]]} onChange={(v) => set({ preferredDevice: v })} />
+      </Row>
+      <Row label="CPU threads" hint="Used when the model runs on the CPU. 0 = one per physical core, usually fastest.">
+        <Num value={l.cpuThreads} min={0} onChange={(v) => set({ cpuThreads: v ?? 0 })} width={100} />
+      </Row>
+      <Row label="GPU memory headroom" hint="Free GPU memory needed beyond the model's weights before it loads on an NVIDIA GPU; with less, Auto uses the CPU.">
+        <Num value={l.gpuHeadroomMB} min={0} onChange={(v) => set({ gpuHeadroomMB: v ?? 1536 })} suffix="MB" width={100} />
       </Row>
       <Row label="Context cap" hint="Upper bound on the local context. Larger needs more GPU memory for the KV cache.">
         <Num value={l.localContextCap} min={2048} onChange={(v) => set({ localContextCap: v ?? 32768 })} suffix="tokens" width={100} />

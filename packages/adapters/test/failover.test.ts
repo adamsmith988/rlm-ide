@@ -2,7 +2,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextOverflowError, ModelWindowError, type ChatChunk, type ChatModelPort, type ChatRequest } from "@rlm/core";
-import { defaultSettings, type FailoverSettings } from "@rlm/contracts";
+import { defaultSettings, OMNIROUTE_AUTO_MODEL_ID, type FailoverSettings } from "@rlm/contracts";
 import { ContinuationDeduper, FailoverChat, ModelHealth, ModelHttpError, ProviderRouter, classifyFailure, resumePoint, seamSpace, type FailoverCandidate } from "../src";
 
 type Script = (req: ChatRequest) => AsyncIterable<ChatChunk>;
@@ -507,6 +507,10 @@ describe("failover through the router over HTTP", () => {
       messages: Array<{ role: string; content: string }>;
     }> = [];
     const s0 = createServer((req, res) => {
+      if (req.method !== "POST") {
+        res.writeHead(404).end();
+        return;
+      }
       let b = "";
       req.on("data", (d) => (b += d));
       req.on("end", () => {
@@ -581,6 +585,34 @@ describe("failover through the router over HTTP", () => {
     s.roles.summarizer = "m2";
     expect(r.chainFor("summarizer")).toEqual(["m2", "m0", "m1"]);
     expect(r.chainFor("agent")).toEqual(["m0", "m1", "m2"]);
+  });
+
+  it("runs the single OmniRoute model as its free-model chain, switching to the next one on failure", async () => {
+    const down = await serve((res) => {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end('{"error":{"message":"upstream down"}}');
+    });
+    const up = await serve((res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end(`${chunk({ choices: [{ delta: { content: "free ok" } }] })}data: [DONE]\n\n`);
+    });
+    const s = defaultSettings();
+    const r = router([down, up, "http://127.0.0.1:9/v1"], 300, s);
+    s.models.push({ id: OMNIROUTE_AUTO_MODEL_ID, providerId: "p0", name: "rlm-free", label: "OmniRoute", kind: "chat", contextLength: 4096, maxOutputTokens: 256, dim: null });
+    s.roles.agent = OMNIROUTE_AUTO_MODEL_ID;
+    s.roles.agentFallbacks = ["m2"];
+    s.omniroute.chain = ["m0", "m1"];
+    expect(r.chainFor("agent")).toEqual(["m0", "m1", "m2"]);
+    expect(await r.limits(OMNIROUTE_AUTO_MODEL_ID)).toEqual({ contextLength: 8192, maxOutputTokens: 512 });
+    const { text, chunks } = await run(await r.chat("agent"));
+    expect(chunks.find((c) => c.type === "switch")).toMatchObject({ from: "Model 0", to: "Model 1" });
+    expect(text).toBe("free ok");
+
+    s.omniroute.chain = [];
+    s.roles.agentFallbacks = [];
+    r.invalidate();
+    expect(r.chainFor("agent")).toEqual([]);
+    await expect(r.chat("agent")).rejects.toThrow(/Set up free models/);
   });
 
   it("uses the plain model when failover is off", async () => {

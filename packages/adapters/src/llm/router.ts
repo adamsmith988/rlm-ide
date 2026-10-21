@@ -1,7 +1,8 @@
-import type { ModelConfig, ProviderConfig, Settings } from "@rlm/contracts";
+import { OMNIROUTE_AUTO_MODEL_ID, type ModelConfig, type ProviderConfig, type Settings } from "@rlm/contracts";
 import type { ChatModelPort, EmbeddingPort, ModelCatalogPort, ModelLimitsInfo, ModelRouterPort } from "@rlm/core";
 import { detectOpenAICompatLimits, OpenAICompatChat, OpenAICompatEmbed, type OpenAICompatConfig } from "./openai_compat";
 import { FailoverChat, ModelHealth } from "./failover";
+import { isOllama, OllamaChat, ollamaPlan, type OllamaPlan } from "./ollama";
 
 export interface RouterDeps {
   settings: () => Settings;
@@ -38,7 +39,20 @@ export class ProviderRouter implements ModelRouterPort, ModelCatalogPort {
   chainFor(role: "agent" | "summarizer"): string[] {
     const s = this.d.settings();
     const isChat = (id: string) => s.models.some((m) => m.id === id && m.kind === "chat");
-    return [...new Set([this.modelIdFor(role), s.roles.agent, ...s.roles.agentFallbacks])].filter(isChat);
+    const ids = [this.modelIdFor(role), s.roles.agent, ...s.roles.agentFallbacks].flatMap((id) => this.expand(id));
+    return [...new Set(ids)].filter(isChat);
+  }
+
+  /** The "OmniRoute" model stands for its tested free-model chain, best first. */
+  private expand(id: string): string[] {
+    return id === OMNIROUTE_AUTO_MODEL_ID ? this.d.settings().omniroute.chain : [id];
+  }
+
+  /** The configured model a role's id resolves to: the first member for "OmniRoute". */
+  private resolve(id: string): string {
+    const first = this.expand(id)[0];
+    if (!first) throw new Error("OmniRoute has no tested free models yet. Open Settings → Models → Free models and press “Set up free models”.");
+    return first;
   }
 
   modelIdFor(role: "agent" | "summarizer" | "embed"): string {
@@ -85,14 +99,17 @@ export class ProviderRouter implements ModelRouterPort, ModelCatalogPort {
   }
 
   /** Chat adapter for one configured model, independent of role assignments. */
-  async chatFor(id: string): Promise<ChatModelPort> {
+  async chatFor(requested: string): Promise<ChatModelPort> {
+    const id = this.resolve(requested);
     const cached = this.chatCache.get(id);
     if (cached) return cached;
     const { model, provider } = this.model(id);
     if (model.kind !== "chat") throw new Error(`Model '${id}' is an embedding model, not a chat model.`);
     let port: ChatModelPort;
-    if (provider.kind === "local_onnx") port = this.d.localChat(model);
-    else port = new OpenAICompatChat(model.id, this.apiConfig(model, provider));
+    const cfg = provider.kind === "local_onnx" ? null : this.apiConfig(model, provider);
+    if (!cfg) port = this.d.localChat(model);
+    else if (await isOllama(cfg.baseUrl, cfg.apiKey)) port = new OllamaChat(model.id, cfg, () => this.ollamaPlan(model, cfg));
+    else port = new OpenAICompatChat(model.id, cfg);
     this.chatCache.set(id, port);
     return port;
   }
@@ -116,7 +133,8 @@ export class ProviderRouter implements ModelRouterPort, ModelCatalogPort {
     return port;
   }
 
-  async limits(modelId: string): Promise<ModelLimitsInfo> {
+  async limits(requested: string): Promise<ModelLimitsInfo> {
+    const modelId = requested === OMNIROUTE_AUTO_MODEL_ID && !this.d.settings().omniroute.chain.length ? requested : this.resolve(requested);
     const { model, provider } = this.model(modelId);
     const s = this.d.settings();
     if (provider.kind === "local_onnx") {
@@ -125,11 +143,32 @@ export class ProviderRouter implements ModelRouterPort, ModelCatalogPort {
       const ctx = Math.min(native, model.contextLength ?? s.local.localContextCap, s.local.localContextCap);
       return { contextLength: ctx, maxOutputTokens: Math.min(s.local.localMaxOutputTokens, Math.floor(ctx / 2)) };
     }
+    const cfg = this.apiConfig(model, provider);
+    if (await isOllama(cfg.baseUrl, cfg.apiKey)) {
+      // The window Ollama is told to run; prompts are built for it, never for the model's larger native window.
+      const plan = await this.ollamaPlan(model, cfg).catch((e: unknown) => {
+        this.d.log?.("ollama window unknown", { model: model.id, error: String(e) });
+        return null;
+      });
+      if (plan) {
+        const out = model.maxOutputTokens ? Math.min(model.maxOutputTokens, Math.floor(plan.numCtx / 2)) : Math.floor(plan.numCtx / 4);
+        return { contextLength: plan.numCtx, maxOutputTokens: out };
+      }
+    }
     return { contextLength: model.contextLength, maxOutputTokens: model.maxOutputTokens };
+  }
+
+  private ollamaPlan(model: ModelConfig, cfg: OpenAICompatConfig): Promise<OllamaPlan> {
+    const s = this.d.settings().local;
+    return ollamaPlan(cfg, { cap: s.ollamaContextCap, kvRamShare: s.ollamaKvRamShare, configured: model.contextLength }).then((p) => {
+      this.d.log?.("ollama window", { model: model.id, numCtx: p.numCtx, native: p.native, why: p.why });
+      return p;
+    });
   }
 
   /** Auto-detect limits for an API model (vLLM max_model_len, OpenRouter metadata, Ollama). */
   async detect(modelId: string): Promise<ModelLimitsInfo> {
+    if (modelId === OMNIROUTE_AUTO_MODEL_ID) return this.limits(modelId);
     const { model, provider } = this.model(modelId);
     if (provider.kind === "local_onnx") return this.limits(modelId);
     return detectOpenAICompatLimits({ baseUrl: provider.baseUrl, apiKey: this.d.apiKey(provider.id), model: model.name });

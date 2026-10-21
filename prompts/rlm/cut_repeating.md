@@ -1,0 +1,1 @@
+Your last reply kept repeating the same passage, so the IDE stopped it. Do not write that passage again. Take one different, concrete step now: a short `repl` block that checks something you have not checked yet, or your answer if you already have what you need.

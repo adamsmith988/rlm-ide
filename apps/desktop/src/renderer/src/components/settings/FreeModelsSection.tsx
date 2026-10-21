@@ -219,7 +219,7 @@ function FreeChain({ v, busy, act }: { v: OmniRouteView; busy: boolean; act: Act
           className="btn btn-primary btn-sm"
           disabled={busy}
           data-testid="omniroute-setup"
-          onClick={() => void act("setup", () => call("omniroute:setup", { models: [] }), "Free models are now the agent")}
+          onClick={() => void act("setup", () => call("omniroute:setup", { models: [] }), "OmniRoute is now the agent's model")}
         >
           {chain.length ? "Set up again" : "Set up free models"}
         </button>

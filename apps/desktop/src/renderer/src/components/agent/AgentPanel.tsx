@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { agentPickerModels } from "@rlm/contracts";
 import { call } from "../../api";
+import { selectAgentModel } from "../../models";
 import type { UiMessage } from "../../chat/model";
 import { useApp } from "../../store";
 import { ICopy, IDown, IPlus, IUp } from "../../ui/icons";
@@ -21,7 +23,7 @@ const STARTERS = [
 ];
 
 export function AgentPanel() {
-  const { chatId, chats, newChat, workspace, context, status, settings, updateSettings } = useApp();
+  const { chatId, chats, newChat, workspace, context, status, settings } = useApp();
   const messages = useApp((s) => (s.chatId ? (s.messages[s.chatId] ?? EMPTY) : EMPTY));
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -45,7 +47,7 @@ export function AgentPanel() {
     return () => clearInterval(t);
   }, [running, chatId]);
 
-  const chatModels = settings?.models.filter((m) => m.kind === "chat") ?? [];
+  const chatModels = settings ? agentPickerModels(settings) : [];
   return (
     <section className="flex h-full flex-col border-l border-line bg-bg">
       <div className="flex h-10 shrink-0 items-center gap-2 px-3">
@@ -54,7 +56,7 @@ export function AgentPanel() {
           className="max-w-[150px] cursor-pointer truncate rounded-full border border-line bg-surface px-2 py-[2px] text-[11px] text-dim outline-none hover:border-line-strong"
           value={settings?.roles.agent ?? ""}
           title="Agent model"
-          onChange={(e) => void updateSettings({ roles: { agent: e.target.value } })}
+          onChange={(e) => void selectAgentModel(e.target.value)}
         >
           {chatModels.map((m) => (
             <option key={m.id} value={m.id}>

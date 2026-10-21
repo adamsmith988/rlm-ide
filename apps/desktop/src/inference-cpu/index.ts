@@ -1,4 +1,5 @@
 /** CPU fallback for the built-in agent model (onnxruntime-node via Transformers.js). */
+import { cpuThreads } from "@rlm/inference/src/cpu";
 import { LocalGenerator, type InferenceRequest } from "@rlm/inference/src/generate";
 
 interface PortLike {
@@ -8,7 +9,7 @@ interface PortLike {
 }
 const parent = (process as unknown as { parentPort: { on(ev: "message", cb: (e: { data: Record<string, unknown>; ports: PortLike[] }) => void): void; postMessage(m: unknown): void } }).parentPort;
 
-parent.on("message", (e) => {
+parent.on("message", async (e) => {
   if (e.data.kind !== "port") return;
   const port = e.ports[0];
   if (!port) return;
@@ -16,6 +17,7 @@ parent.on("message", (e) => {
     modelRoot: String(e.data.modelRoot),
     modelDir: String(e.data.modelDir),
     device: "cpu",
+    cpuThreads: await cpuThreads(Number(e.data.cpuThreads ?? 0)),
     onStatus: (s) => parent.postMessage({ kind: "status", status: s }),
   });
   port.on("message", (m) => gen.handle(m.data as InferenceRequest, (r) => port.postMessage(r)));

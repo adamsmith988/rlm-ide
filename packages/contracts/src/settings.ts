@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ModelConfig, ProviderConfig, BUILTIN } from "./models";
 import { HubSettings } from "./hub";
+import { OMNIROUTE_AUTO_MODEL_ID } from "./omniroute";
 
 /** Every threshold used by the orchestrator lives here with a default and a reason.
  * Logic code never hard-codes these numbers. */
@@ -36,6 +37,21 @@ export const RlmSettings = z.object({
   maxAutoWakeups: z.number().int().min(0).default(200),
   /** An API model request fails when the server sends nothing for this long (slow prompt processing included). */
   modelStallSec: z.number().int().min(10).default(300),
+  /** Reasoning allowed per step, as a share of the step's output budget: past it the step is cut off and the model is
+   * told to act on what it has. */
+  thinkingMaxShare: z.number().min(0.1).max(1).default(0.6),
+  /** ...and never more than this many tokens of reasoning per step. */
+  thinkingMaxTokens: z.number().int().min(256).default(8192),
+  /** ...nor longer than this many seconds (slow local models reach the token budget only after a very long time). */
+  thinkingMaxSec: z.number().int().min(10).default(180),
+  /** A reply whose last part repeats this many times in a row (a model stuck in a loop) is cut off. */
+  repeatLimit: z.number().int().min(2).default(4),
+  /** Cut-off replies allowed in a row before the turn stops with an explanation. */
+  maxCutsInARow: z.number().int().min(1).default(3),
+  /** The same cell giving the same output this many times in one turn is not run again. */
+  maxIdenticalCells: z.number().int().min(2).default(3),
+  /** A user message larger than this share of the window goes to the REPL as `user_message`; the prompt gets a preview. */
+  largeInputShare: z.number().min(0.05).max(0.9).default(0.25),
   /** Per-cell execution timeout. */
   cellTimeoutSec: z.number().int().min(5).default(120),
   /** Cell output beyond this many chars is truncated with a marker. */
@@ -62,7 +78,8 @@ export const MemorySettings = z.object({
   chunkChars: z.number().int().min(200).default(1200),
   chunkOverlap: z.number().int().min(0).default(150),
   maxChunksPerTurn: z.number().int().min(1).default(64),
-  minScore: z.number().min(0).max(1).default(0.45),
+  /** Recalled facts and excerpts must be at least this similar to the request (bge-m3 cosine; unrelated text scores ~0.3-0.5). */
+  minScore: z.number().min(0).max(1).default(0.55),
   sessionLimit: z.number().int().min(0).default(6),
   userLimit: z.number().int().min(0).default(6),
   /** While the user has at most this many long-term facts, all of them are recalled (they are standing preferences). */
@@ -71,9 +88,16 @@ export const MemorySettings = z.object({
   factKnownLimit: z.number().int().min(0).default(12),
   factRequireUserGrounding: z.boolean().default(true),
   factDedupScore: z.number().min(0).max(1).default(0.88),
+  /** At most this many new facts are learned from one exchange. */
+  factMaxAddsPerTurn: z.number().int().min(0).default(3),
+  /** A fact is one short sentence; longer text is pasted content, not a fact. */
+  factMaxChars: z.number().int().min(40).default(200),
+  /** Messages shorter than this ("ok", "continue") carry no facts and are not distilled. */
+  factMinUserChars: z.number().int().min(0).default(12),
   historyKeep: z.number().int().min(0).default(5),
-  /** "user" = user-wide long-term memory (source default), "workspace" = per project. */
-  longTermScope: z.enum(["user", "workspace"]).default("user"),
+  /** "workspace": facts about the user follow them everywhere, facts about a project stay in that project.
+   * "user": every fact is recalled in every project. */
+  longTermScope: z.enum(["user", "workspace"]).default("workspace"),
 });
 
 export const ToolSettings = z.object({
@@ -121,6 +145,8 @@ export const OmniRouteSettings = z.object({
   minAgentInputChars: z.number().int().min(2000).default(12000),
   /** npm package spec installed into the app data folder. */
   packageSpec: z.string().min(1).default("omniroute@latest"),
+  /** Tested free models, best first, that the "OmniRoute" model switches through. Written by the free-model setup. */
+  chain: z.array(z.string()).default([]),
 });
 
 export const LocalInferenceSettings = z.object({
@@ -129,9 +155,26 @@ export const LocalInferenceSettings = z.object({
   localMaxOutputTokens: z.number().int().min(256).default(4096),
   preferredDevice: z.enum(["auto", "webgpu", "cpu"]).default("auto"),
   enableThinking: z.boolean().default(true),
+  /** Ollama servers are driven through their native API so the context window (num_ctx) is set, not guessed: it is
+   * the model's window, capped here... */
+  ollamaContextCap: z.number().int().min(2048).default(32768),
+  /** ...and by this share of the computer's free memory for the KV cache, measured when the model is first used. */
+  ollamaKvRamShare: z.number().min(0.05).max(0.9).default(0.35),
+  /** Longest text the embedder reads at once (bge-m3 reads up to 8192 tokens, but its memory grows with the square). */
+  embedMaxTokens: z.number().int().min(128).max(8192).default(1024),
+  /** Threads for the built-in model on the CPU; 0 = one per physical core (one per logical CPU, onnxruntime's
+   * default, is about 3x slower on CPUs with hyper-threading). */
+  cpuThreads: z.number().int().min(0).max(256).default(0),
+  /** Free GPU memory the built-in model needs beyond its weights (KV cache and buffers), checked before it loads on an
+   * NVIDIA GPU so that a full GPU falls back to the CPU instead of crashing the GPU process. */
+  gpuHeadroomMB: z.number().int().min(0).default(1536),
 });
 
+/** Bumped when a default changes meaning; `migrateSettings` moves older files forward. */
+export const SETTINGS_VERSION = 2;
+
 export const Settings = z.object({
+  settingsVersion: z.number().int().default(SETTINGS_VERSION),
   theme: z.enum(["dark", "light"]).default("dark"),
   fontSize: z.number().int().min(10).max(24).default(13),
   userId: z.string().default("local-user"),
@@ -192,6 +235,30 @@ export type OmniRouteSettings = z.infer<typeof OmniRouteSettings>;
 
 export function defaultSettings(): Settings {
   return Settings.parse({});
+}
+
+/** Settings files are saved whole, so a changed default reaches existing installs only through here. */
+export function migrateSettings(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const r = raw as Record<string, unknown>;
+  const from = typeof r.settingsVersion === "number" ? r.settingsVersion : 1;
+  if (from >= SETTINGS_VERSION) return raw;
+  const out: Record<string, unknown> = { ...r, settingsVersion: SETTINGS_VERSION };
+  if (from < 2) {
+    // v2: memory is per project (facts about the user stay shared) and recall needs a closer match.
+    const m = { ...((r.memory as Record<string, unknown> | undefined) ?? {}) };
+    if (m.longTermScope === undefined || m.longTermScope === "user") m.longTermScope = "workspace";
+    if (m.minScore === undefined || m.minScore === 0.45) m.minScore = 0.55;
+    out.memory = m;
+  }
+  return out;
+}
+
+/** Chat models for the agent's model pickers. The free models behind "OmniRoute" are listed as that one model, which
+ * switches between them; one stays visible only while it is the current pick. */
+export function agentPickerModels(s: Settings): ModelConfig[] {
+  const auto = s.models.find((m) => m.id === OMNIROUTE_AUTO_MODEL_ID);
+  return s.models.filter((m) => m.kind === "chat" && (!auto || m.providerId !== auto.providerId || m.id === auto.id || m.id === s.roles.agent));
 }
 
 /** Points roles whose model was removed back at a model that exists, preferring the built-ins. */

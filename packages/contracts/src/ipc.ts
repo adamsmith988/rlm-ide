@@ -11,6 +11,8 @@ export const IpcSchemas = {
   /** Returns the folder passed via RLM_OPEN_WORKSPACE once, then null. */
   "app:takeAutoOpen": z.object({}),
   "dialog:openFolder": z.object({}),
+  /** Starts another copy of the IDE (another window), optionally on a folder. */
+  "app:newWindow": z.object({ root: z.string().min(1).optional() }),
   "workspace:open": z.object({ root: z.string().min(1) }),
   "fs:readDir": z.object({ path: z.string() }),
   "fs:readFile": z.object({ path: z.string() }),
@@ -94,9 +96,10 @@ export const IpcSchemas = {
   "hub:deploy": HubDeployRequest,
   "hub:deployment": z.object({ id: z.string().min(1), action: z.enum(["start", "stop", "remove", "test"]) }),
   "hub:tools": z.object({
-    action: z.enum(["probe", "setupPython", "installPackages", "installLlamaCpp"]),
+    action: z.enum(["probe", "setupPython", "installPackages", "installLlamaCpp", "downloadLlamaCpp"]),
     packages: z.array(z.string().regex(/^[A-Za-z0-9_.\-\[\],<>=!~ ]+$/).max(200)).max(50).default([]),
-    backend: z.enum(["cpu", "cuda"]).default("cpu"),
+    /** Source builds: cpu or cuda. Downloads: auto (best for this computer), gpu, or cpu. */
+    backend: z.enum(["cpu", "cuda", "gpu", "auto"]).default("cpu"),
     env: z.enum(["main", "onnx"]).default("main"),
   }),
   "hub:setToken": z.object({ token: z.string().max(500) }),
@@ -186,6 +189,8 @@ export interface ChatSummary {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Project folder the chat belongs to; chats are listed, recalled and run only inside it. */
+  workspaceId: string | null;
 }
 
 export interface StoredMessage {

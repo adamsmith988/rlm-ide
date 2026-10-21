@@ -12,6 +12,8 @@ export function StatusBar() {
   const agentModel = settings?.models.find((m) => m.id === settings.roles.agent);
   const inf = status.inference;
   const isLocal = settings?.providers.find((p) => p.id === agentModel?.providerId)?.kind === "local_onnx";
+  const infTone = !inf ? "dim" : /^(failed|crashed)/.test(inf.status) ? "err" : inf.status.startsWith("ready") && inf.device !== "cpu" ? "ok" : "warn";
+  const speed = inf && /tok\/s/.test(inf.status) ? inf.status.replace(/^ready · /, "") : null;
   return (
     <footer className="flex shrink-0 items-center gap-4 border-t border-line bg-bg px-3 text-[11.5px] text-dim" style={{ height: "var(--statusbar-h)" }}>
       {workspace && git.branch && (
@@ -22,10 +24,15 @@ export function StatusBar() {
       )}
       {tab && tab.kind === "file" && <span className="mono text-faint">{tab.path}</span>}
       <div className="flex-1" />
-      <button className="flex items-center gap-1.5 hover:text-ink" onClick={() => set({ activity: "settings" })} title="Agent model">
-        <Dot tone={isLocal ? (inf?.status === "ready" ? "ok" : inf?.status === "error" ? "err" : inf ? "warn" : "dim") : "ok"} />
+      <button
+        className="flex items-center gap-1.5 hover:text-ink"
+        onClick={() => set({ activity: "settings" })}
+        title={isLocal && inf?.detail ? `Agent model: ${inf.detail}` : "Agent model"}
+        data-testid="status-agent-model"
+      >
+        <Dot tone={isLocal ? infTone : "ok"} />
         {agentModel?.label ?? "no model"}
-        {isLocal && inf && <span className="text-faint">· {inf.device === "none" ? inf.status : inf.device}</span>}
+        {isLocal && inf && <span className="text-faint">· {inf.device === "none" ? inf.status : speed ? speed : inf.device}</span>}
         {status.contextLength ? <span className="text-faint">· {Math.round(status.contextLength / 1024)}k ctx</span> : null}
       </button>
       <span className="flex items-center gap-1.5" title="Python kernel">

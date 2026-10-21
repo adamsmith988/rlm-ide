@@ -84,6 +84,7 @@ export class HubService {
   private emitTimer: NodeJS.Timeout | null = null;
   private saveTimer: NodeJS.Timeout | null = null;
   private closing = false;
+  private follower = false;
   private readonly shutdown = new AbortController();
 
   constructor(private readonly d: HubDeps) {
@@ -96,6 +97,7 @@ export class HubService {
       basePythons: d.basePythons,
       configuredPython: () => d.settings().hub.python,
       configuredLlamaCpp: () => d.settings().hub.llamaCppDir,
+      llamaRelease: () => ({ repo: d.settings().hub.llamaCppRepo, release: d.settings().hub.llamaCppRelease }),
       onChange: () => this.changed(),
     });
     this.downloads = new DownloadManager(this.hf, {
@@ -117,13 +119,21 @@ export class HubService {
 
   // ---- lifecycle ------------------------------------------------------------------------------
 
-  async boot(): Promise<void> {
+  /** `follower`: another copy of the IDE on this profile runs the deployments; this one shows them and changes nothing. */
+  async boot(opts: { follower?: boolean } = {}): Promise<void> {
+    this.follower = !!opts.follower;
     if (existsSync(this.stateFile)) {
       try {
         this.data = { jobs: [], deployments: [], ...(JSON.parse(readFileSync(this.stateFile, "utf8")) as Partial<Persisted>) };
       } catch (e) {
         this.d.log(`hub state unreadable, starting empty: ${(e as Error).message}`);
       }
+    }
+    if (this.follower) {
+      this.scanModels();
+      await Promise.all([this.tools.probe().catch(() => null), this.tools.llamaCpp().catch(() => null)]);
+      this.changed();
+      return;
     }
     for (const j of this.data.jobs) if (j.view.status === "running" || j.view.status === "queued" || j.view.status === "verifying") j.view.status = "paused";
     this.scanModels();
@@ -151,7 +161,18 @@ export class HubService {
 
   // ---- state ----------------------------------------------------------------------------------
 
+  get isFollower(): boolean {
+    return this.follower;
+  }
+
   view(): HubStateView {
+    if (this.follower) {
+      try {
+        this.data = { jobs: [], deployments: [], ...(JSON.parse(readFileSync(this.stateFile, "utf8")) as Partial<Persisted>) };
+      } catch {
+        /* the leader is rewriting it; show the last state */
+      }
+    }
     return {
       jobs: this.data.jobs.map((j) => j.view),
       models: [...this.models.values()].sort((a, b) => b.downloadedAt - a.downloadedAt),
@@ -176,6 +197,7 @@ export class HubService {
   private saveNow(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
+    if (this.follower) return;
     const tmp = `${this.stateFile}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.data));
     renameSync(tmp, this.stateFile);
@@ -652,15 +674,16 @@ export class HubService {
   }
 
   async toolsAction(
-    action: "probe" | "setupPython" | "installPackages" | "installLlamaCpp",
+    action: "probe" | "setupPython" | "installPackages" | "installLlamaCpp" | "downloadLlamaCpp",
     packages: string[],
-    backend: "cpu" | "cuda",
+    backend: "cpu" | "cuda" | "gpu" | "auto",
     env: HubPythonEnv = "main",
   ): Promise<HubStateView["tools"]> {
     if (action === "probe") await Promise.all([this.tools.probe(true), this.tools.llamaCpp(true)]).then(() => this.tools.probeOnnx(true));
     else if (action === "setupPython") await this.tools.setupPython(env);
     else if (action === "installPackages") await this.tools.pipInstall(packages, env);
-    else await this.tools.installLlamaCpp(backend);
+    else if (action === "downloadLlamaCpp") await this.tools.downloadLlamaCpp(backend === "cpu" ? "cpu" : backend === "auto" ? "auto" : "gpu");
+    else await this.tools.installLlamaCpp(backend === "cuda" ? "cuda" : "cpu");
     return this.view().tools;
   }
 }

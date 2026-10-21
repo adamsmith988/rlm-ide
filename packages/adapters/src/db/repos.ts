@@ -31,20 +31,30 @@ export class SqliteConversationRepo implements ConversationRepo {
     return Number(r.changes);
   }
 
-  async createChat(title: string): Promise<ChatSummary> {
+  async createChat(title: string, workspaceId: string | null): Promise<ChatSummary> {
     const now = Date.now();
-    const c = { id: newId("chat"), title, createdAt: now, updatedAt: now };
-    this.db.raw.prepare("INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)").run(c.id, c.title, now, now);
+    const c = { id: newId("chat"), title, createdAt: now, updatedAt: now, workspaceId };
+    this.db.raw.prepare("INSERT INTO chats (id, title, created_at, updated_at, workspace_id) VALUES (?, ?, ?, ?, ?)").run(c.id, c.title, now, now, workspaceId);
     return c;
   }
 
-  async listChats(): Promise<ChatSummary[]> {
-    return (this.db.raw.prepare("SELECT * FROM chats ORDER BY updated_at DESC").all() as Row[]).map((r) => ({
-      id: String(r.id),
-      title: String(r.title),
-      createdAt: Number(r.created_at),
-      updatedAt: Number(r.updated_at),
-    }));
+  async listChats(workspaceId?: string | null): Promise<ChatSummary[]> {
+    const rows =
+      workspaceId === undefined
+        ? this.db.raw.prepare("SELECT * FROM chats ORDER BY updated_at DESC").all()
+        : workspaceId === null
+          ? this.db.raw.prepare("SELECT * FROM chats WHERE workspace_id IS NULL ORDER BY updated_at DESC").all()
+          : this.db.raw.prepare("SELECT * FROM chats WHERE workspace_id = ? ORDER BY updated_at DESC").all(workspaceId);
+    return (rows as Row[]).map(toChat);
+  }
+
+  async getChat(chatId: string): Promise<ChatSummary | null> {
+    const r = this.db.raw.prepare("SELECT * FROM chats WHERE id = ?").get(chatId) as Row | undefined;
+    return r ? toChat(r) : null;
+  }
+
+  async setChatWorkspace(chatId: string, workspaceId: string): Promise<void> {
+    this.db.raw.prepare("UPDATE chats SET workspace_id = ? WHERE id = ?").run(workspaceId, chatId);
   }
 
   async renameChat(chatId: string, title: string): Promise<void> {
@@ -110,6 +120,16 @@ export class SqliteConversationRepo implements ConversationRepo {
   }
 }
 
+function toChat(r: Row): ChatSummary {
+  return {
+    id: String(r.id),
+    title: String(r.title),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    workspaceId: r.workspace_id == null ? null : String(r.workspace_id),
+  };
+}
+
 function toTurn(r: Row): StoredTurn {
   return {
     id: String(r.id),
@@ -152,8 +172,17 @@ export class SqliteEditJournal implements EditJournal {
       .prepare("INSERT INTO edits (edit_id, turn_id, path, before_text, after_text, created_at, state) VALUES (?, ?, ?, ?, ?, ?, 'applied')")
       .run(e.editId, e.turnId, e.path, e.before, e.after, e.createdAt);
   }
-  async list(): Promise<PendingEditRecord[]> {
-    return (this.db.raw.prepare("SELECT * FROM edits WHERE state = 'applied' ORDER BY created_at DESC LIMIT 200").all() as Row[]).map(toEdit);
+  async list(workspaceId?: string): Promise<PendingEditRecord[]> {
+    const rows =
+      workspaceId === undefined
+        ? this.db.raw.prepare("SELECT * FROM edits WHERE state = 'applied' ORDER BY created_at DESC LIMIT 200").all()
+        : this.db.raw
+            .prepare(
+              `SELECT e.* FROM edits e JOIN turns t ON t.id = e.turn_id JOIN chats c ON c.id = t.chat_id
+               WHERE e.state = 'applied' AND c.workspace_id = ? ORDER BY e.created_at DESC LIMIT 200`,
+            )
+            .all(workspaceId);
+    return (rows as Row[]).map(toEdit);
   }
   async setState(editId: string, state: PendingEditRecord["state"]): Promise<void> {
     this.db.raw.prepare("UPDATE edits SET state = ? WHERE edit_id = ?").run(state, editId);
@@ -211,6 +240,7 @@ export class SqliteMemoryStore implements MemoryVectorStore {
     }
     if (f.workspace_id !== undefined) {
       if (f.workspace_id === null) parts.push(`${alias}.workspace_id IS NULL`);
+      else if (f.include_global) (parts.push(`(${alias}.workspace_id = ? OR ${alias}.workspace_id IS NULL)`), vals.push(f.workspace_id));
       else (parts.push(`${alias}.workspace_id = ?`), vals.push(f.workspace_id));
     }
     return { sql: parts.join(" AND "), vals };

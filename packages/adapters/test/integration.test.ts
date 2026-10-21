@@ -1,9 +1,10 @@
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type * as Sqlite from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { defaultSettings, type Settings, type TurnEvent } from "@rlm/contracts";
-import { Orchestrator, type ChatModelPort, type EmbeddingPort } from "@rlm/core";
+import { Orchestrator, type ChatChunk, type ChatModelPort, type ChatRequest, type EmbeddingPort } from "@rlm/core";
 import { HashEmbedder, ScriptedModel, clock, log, prompts, status } from "../../core/test/fakes";
 import {
   createBuiltinTools,
@@ -27,9 +28,11 @@ interface Harness {
   orch: Orchestrator;
   events: TurnEvent[];
   agent: { model: ChatModelPort };
+  summarizer: { model: ChatModelPort };
   embedder: HashEmbedder;
   settings: Settings;
   ws: string;
+  workspace: Workspace;
   memory: SqliteMemoryStore;
   run(chatId: string, text: string, approve?: boolean): Promise<TurnEvent[]>;
 }
@@ -49,14 +52,14 @@ function harness(): Harness {
   );
   const embedder = new HashEmbedder();
   const agent: { model: ChatModelPort } = { model: new ScriptedModel("agent", () => "hello") };
-  const summarizer = new ScriptedModel("sum", () => "[]");
+  const summarizer: { model: ChatModelPort } = { model: new ScriptedModel("sum", () => "[]") };
   const memory = new SqliteMemoryStore(db);
   const events: TurnEvent[] = [];
   const orch: Orchestrator = new Orchestrator({
     settings: { get: () => settings },
     updateSettings: (p) => Object.assign(settings, p),
     router: {
-      chat: async (role) => (role === "agent" ? agent.model : summarizer),
+      chat: async (role) => (role === "agent" ? agent.model : summarizer.model),
       embedder: async () => embedder as EmbeddingPort,
       modelIdFor: () => "test-model",
     },
@@ -89,9 +92,11 @@ function harness(): Harness {
     orch,
     events,
     agent,
+    summarizer,
     embedder,
     settings,
     ws,
+    workspace,
     memory,
     autoApprove: true,
     async run(chatId: string, text: string, approve = true) {
@@ -277,6 +282,117 @@ describe("RLM engine end to end (scripted model, real kernel + tools)", () => {
   });
 });
 
+/** A model that streams `kind` chunks from `next(i)` until stopped, or a fixed reply. */
+class RunawayModel implements ChatModelPort {
+  readonly calls: ChatRequest[] = [];
+  constructor(
+    readonly modelId: string,
+    private readonly plan: (req: ChatRequest, n: number) => { kind: "thinking" | "text"; next: (i: number) => string } | string,
+  ) {}
+  async *stream(req: ChatRequest): AsyncIterable<ChatChunk> {
+    this.calls.push(req);
+    const p = this.plan(req, this.calls.length - 1);
+    if (typeof p === "string") {
+      yield { type: "text", text: p };
+      return;
+    }
+    for (let i = 0; i < 100_000; i++) {
+      if (req.signal?.aborted) throw new DOMException("stopped", "AbortError");
+      yield { type: p.kind, text: p.next(i) };
+      if (i % 50 === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    throw new Error("the guard never cut this reply off");
+  }
+}
+
+const lastPrompt = (req: ChatRequest) => req.messages.map((m) => m.content).join("\n");
+const words = ["file", "parse", "index", "maybe", "token", "check", "branch", "value", "layout", "router", "cache", "query"];
+/** Reasoning that never repeats: a different word sequence every chunk. */
+const freshThought = (i: number) => `${words[i % 12]} ${words[(i * 7) % 11]} ${words[(i * 5 + 3) % 12]}${"xyzw"[i % 4]!.repeat((i % 5) + 1)}. `;
+
+describe("runaway replies", () => {
+  let h: Harness;
+  beforeAll(() => {
+    h = harness();
+    h.settings.rlm.thinkingMaxTokens = 400;
+  });
+  afterAll(async () => h.orch.engine.shutdownAll());
+
+  it("cuts off reasoning past its budget and has the model act without reasoning", async () => {
+    const chat = await h.orch.createChat("think");
+    const m = new RunawayModel("agent", (req, n) =>
+      n === 0 ? { kind: "thinking", next: freshThought } : n === 1 ? "```repl\nprint(2 + 2)\n```" : "It is 4.",
+    );
+    h.agent.model = m;
+    const ev = await h.run(chat.id, "what is 2 + 2?");
+    expect(ev.some((e) => e.type === "status" && /reasoned for ~\d+ tokens without acting/.test((e as { text: string }).text))).toBe(true);
+    expect(lastPrompt(m.calls[1]!)).toContain("so the IDE stopped you");
+    expect(m.calls[1]!.enableThinking).toBe(false);
+    expect(m.calls[2]!.enableThinking).toBeUndefined();
+    expect((ev.find((e) => e.type === "turn_done") as { finalText: string }).finalText).toBe("It is 4.");
+  });
+
+  it("cuts off a reply that repeats itself and retries warmer", async () => {
+    const chat = await h.orch.createChat("repeat");
+    const m = new RunawayModel("agent", (_req, n) => (n === 0 ? { kind: "text", next: () => "Let me look at the configuration file once more. " } : "Done."));
+    h.agent.model = m;
+    const ev = await h.run(chat.id, "fix the config");
+    expect(ev.some((e) => e.type === "status" && /repeating itself/.test((e as { text: string }).text))).toBe(true);
+    expect(m.calls[1]!.temperature).toBe(0.7);
+    expect(lastPrompt(m.calls[1]!)).toContain("kept repeating the same passage");
+    expect((ev.find((e) => e.type === "turn_done") as { finalText: string }).finalText).toBe("Done.");
+  });
+
+  it("catches reasoning that circles back to the same sentence", async () => {
+    const chat = await h.orch.createChat("circle");
+    const m = new RunawayModel("agent", (_req, n) =>
+      n === 0 ? { kind: "thinking", next: (i) => (i % 3 === 0 ? "Wait, I should re-read the user request again carefully. " : freshThought(i)) } : "Answer.",
+    );
+    h.agent.model = m;
+    h.settings.rlm.thinkingMaxTokens = 100_000;
+    const ev = await h.run(chat.id, "explain");
+    h.settings.rlm.thinkingMaxTokens = 400;
+    expect(ev.some((e) => e.type === "status" && /repeating itself/.test((e as { text: string }).text))).toBe(true);
+  });
+
+  it("stops the turn with an explanation when the model keeps looping", async () => {
+    const chat = await h.orch.createChat("stuck");
+    h.agent.model = new RunawayModel("agent", () => ({ kind: "text", next: () => "I am going around in circles here, again. " }));
+    const ev = await h.run(chat.id, "go");
+    const done = ev.find((e) => e.type === "turn_done") as { finalText: string };
+    expect(done.finalText).toMatch(/kept repeating itself 4 times in a row/);
+  });
+
+  it("does not keep running the same cell for the same output", async () => {
+    const chat = await h.orch.createChat("same-cell");
+    h.agent.model = new ScriptedModel("agent", (req) => (/\[not run\]/.test(lastPrompt(req)) ? "Nothing changes; stopping." : "```repl\nprint('same')\n```"));
+    const ev = await h.run(chat.id, "poll");
+    const out = ev.filter((e) => e.type === "cell_output").map((e) => (e as { text: string }).text).join("");
+    expect(out).toContain("[not run] This exact cell already ran 3 times");
+    expect(ev.filter((e) => e.type === "code_cell")).toHaveLength(4);
+    expect((ev.find((e) => e.type === "turn_done") as { finalText: string }).finalText).toBe("Nothing changes; stopping.");
+  });
+
+  it("hands a message too large for the prompt to the REPL", async () => {
+    const chat = await h.orch.createChat("large");
+    const filler = (n: number) => Array.from({ length: n }, (_, i) => `Line ${i}: ${words[i % 12]} ${words[(i * 5) % 12]}.`).join("\n");
+    const big = `${filler(1500)}\nNEEDLE-7731 is the deploy key name.\n${filler(1500)}`;
+    let first = "";
+    h.agent.model = new ScriptedModel("agent", (req, n) => {
+      if (n === 0) {
+        first = lastPrompt(req);
+        return "```repl\nprint(user_message.find('NEEDLE-7731') > 0, len(user_message))\n```";
+      }
+      return "Found it.";
+    });
+    const ev = await h.run(chat.id, big);
+    expect(first).toContain("All of it is in the REPL variable `user_message`");
+    expect(first).not.toContain("NEEDLE-7731");
+    const out = ev.filter((e) => e.type === "cell_output").map((e) => (e as { text: string }).text).join("");
+    expect(out).toContain(`True ${big.length}`);
+  });
+});
+
 describe("memory", () => {
   let h: Harness;
   beforeAll(() => {
@@ -334,6 +450,117 @@ describe("memory", () => {
 
   it("vector tables are prefixed and isolated", () => {
     expect(h.memory.collections().every((c) => c.startsWith("orchestrator_memory__"))).toBe(true);
+  });
+});
+
+const cellText = (ev: TurnEvent[]) =>
+  ev
+    .filter((e) => e.type === "cell_output")
+    .map((e) => (e as { text: string }).text)
+    .join("");
+
+describe("project isolation", () => {
+  let h: Harness;
+  let other: string;
+  beforeAll(() => {
+    h = harness();
+    other = mkdtempSync(path.join(tmpdir(), "rlm-ws2-"));
+  });
+  afterAll(async () => h.orch.engine.shutdownAll());
+
+  it("lists, runs and continues chats only inside their own project", async () => {
+    const a = await h.orch.createChat("in A");
+    expect(a.workspaceId).toBe(h.ws);
+    h.agent.model = new ScriptedModel("agent", (_r, n) => (n === 0 ? "```repl\nsecret = 41 + 1\nimport os\nprint(os.getcwd())\n```" : "ok"));
+    expect(cellText(await h.run(a.id, "remember a number"))).toContain(path.basename(h.ws));
+
+    h.workspace.set(other);
+    await h.orch.workspaceChanged();
+    expect((await h.orch.listChats()).map((c) => c.id)).not.toContain(a.id);
+    await expect(h.orch.send({ chatId: a.id, text: "hi", editorContext: {} })).rejects.toThrow(/belongs to the project/);
+    const b = await h.orch.createChat("in B");
+    expect((await h.orch.listChats()).map((c) => c.id)).toEqual([b.id]);
+    h.agent.model = new ScriptedModel("agent", (_r, n) => (n === 0 ? "```repl\nimport os\nprint(os.getcwd(), 'secret' in globals())\n```" : "ok"));
+    const inB = cellText(await h.run(b.id, "where am I"));
+    expect(inB).toContain(path.basename(other));
+    expect(inB).toContain("False");
+
+    h.workspace.set(h.ws);
+    await h.orch.workspaceChanged();
+    expect((await h.orch.listChats()).map((c) => c.id)).toEqual([a.id]);
+    // The folder switch ended A's idle kernel; its next turn starts a fresh one in A.
+    h.agent.model = new ScriptedModel("agent", (_r, n) => (n === 0 ? "```repl\nimport os\nprint(os.getcwd(), 'secret' in globals())\n```" : "ok"));
+    const back = cellText(await h.run(a.id, "again"));
+    expect(back).toContain(path.basename(h.ws));
+    expect(back).toContain("False");
+  });
+
+  it("keeps project facts in their project, facts about the user everywhere, and chat excerpts in their chat", async () => {
+    const s = { ...h.settings.memory, minScore: 0.2 };
+    expect(s.longTermScope).toBe("workspace");
+    const inA = { userId: "iso", sessionId: "c1", workspaceId: h.ws };
+    const inB = { ...inA, sessionId: "c2", workspaceId: other };
+    await h.orch.memory.addFact(inA, "The billing service deploys with Docker Compose on Hetzner", "stack", undefined, undefined, "project");
+    await h.orch.memory.addFact(inA, "Prefers pnpm over npm for installs", "tooling");
+    const q = "how does the billing service deploy, and should I use pnpm or npm for installs?";
+    const a = await h.orch.memory.recall(q, inA, s);
+    expect(a.items.map((i) => i.text)).toEqual(expect.arrayContaining(["The billing service deploys with Docker Compose on Hetzner", "Prefers pnpm over npm for installs"]));
+    expect(a.block).toContain("Known about this project");
+    expect(a.block).toContain("Known about the user");
+    const b = await h.orch.memory.recall(q, inB, s);
+    expect(b.items.map((i) => i.text)).toContain("Prefers pnpm over npm for installs");
+    expect(b.items.some((i) => i.text.includes("Hetzner"))).toBe(false);
+
+    await h.orch.memory.saveTurn(inA, s, "The staging password rotation happens on Fridays", "ok");
+    const sameChat = await h.orch.memory.recall("when does the staging password rotation happen", inA, s);
+    expect(sameChat.items.some((i) => i.memoryType === "short_term")).toBe(true);
+    const newChat = await h.orch.memory.recall("when does the staging password rotation happen", { ...inA, sessionId: "c3" }, s);
+    expect(newChat.items.some((i) => i.memoryType === "short_term")).toBe(false);
+  });
+
+  it("learns only short facts the user stated, filed as user or project facts", async () => {
+    const s = { ...h.settings.memory };
+    const scope = { userId: "learn", sessionId: "c1", workspaceId: h.ws };
+    const long = `The user asked to fix the login button, so the agent edited styles.css, re-ran the whole test suite twice, checked the button in the browser and confirmed the login button now looks right on every page ${"again ".repeat(10)}`;
+    const sum = new ScriptedModel("sum", () =>
+      JSON.stringify([
+        { op: "add", about: "project", text: "The API runs on Node 22 and is tested with vitest", category: "stack" },
+        { op: "add", about: "user", text: "Name is Amanda", category: "identity" },
+        { op: "add", about: "user", text: "Likes Haskell and category theory" },
+        { op: "add", about: "project", text: "```js\nconst a = 1\n```" },
+        { op: "add", about: "project", text: long },
+      ]),
+    );
+    h.summarizer.model = sum;
+    await h.orch.memory.learnFacts(scope, s, "I'm Amanda. Our API runs on Node 22 and we test with vitest. Please fix the login button.", "Fixed.");
+    const facts = await h.memory.list({ user_id: "learn", memory_type: "long_term" });
+    expect(facts.map((f) => [f.payload.text, f.payload.workspace_id]).sort()).toEqual([
+      ["Name is Amanda", null],
+      ["The API runs on Node 22 and is tested with vitest", h.ws],
+    ]);
+    const calls = sum.calls.length;
+    await h.orch.memory.learnFacts(scope, s, "ok thanks", "Done.");
+    expect(sum.calls.length).toBe(calls);
+  });
+});
+
+describe("database migration", () => {
+  it("files existing chats under the project their turns were saved in", async () => {
+    const file = path.join(mkdtempSync(path.join(tmpdir(), "rlm-mig-")), "old.db");
+    const { DatabaseSync } = process.getBuiltinModule("node:sqlite") as typeof Sqlite;
+    const raw = new DatabaseSync(file);
+    raw.exec(readFileSync(path.join(ROOT, "packages/adapters/src/db/migrations/001_init.sql"), "utf8"));
+    raw.exec("CREATE TABLE schema_version (version INTEGER NOT NULL); INSERT INTO schema_version VALUES (1);");
+    raw.exec("INSERT INTO chats (id, title, created_at, updated_at) VALUES ('c1', 'a', 1, 2), ('c2', 'b', 1, 1);");
+    raw.exec(
+      "INSERT INTO memory (id, user_id, session_id, memory_type, kind, category, workspace_id, text, created_at, updated_at) VALUES ('m1', 'u', 'c1', 'short_term', 'chunk', 'turn', '/p/a', 'x', 1, 1);",
+    );
+    raw.close();
+    const repo = new SqliteConversationRepo(openDb(file, null));
+    expect(await repo.getChat("c1")).toMatchObject({ workspaceId: "/p/a" });
+    expect(await repo.getChat("c2")).toMatchObject({ workspaceId: null });
+    expect((await repo.listChats("/p/a")).map((c) => c.id)).toEqual(["c1"]);
+    expect((await repo.listChats(null)).map((c) => c.id)).toEqual(["c2"]);
   });
 });
 

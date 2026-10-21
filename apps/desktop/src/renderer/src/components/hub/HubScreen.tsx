@@ -335,7 +335,7 @@ function DeployForm({ model, onDone }: { model: HubModelView; onDone: () => void
   const [source, setSource] = useState("");
   const [quant, setQuant] = useState("");
   const [kind, setKind] = useState<"chat" | "embed">("chat");
-  const [device, setDevice] = useState<"cpu" | "cuda">("cpu");
+  const [device, setDevice] = useState<"cpu" | "cuda" | "gpu">("cpu");
   const [dtype, setDtype] = useState("auto");
   const [ctx, setCtx] = useState("");
   const [remote, setRemote] = useState(false);
@@ -363,7 +363,7 @@ function DeployForm({ model, onDone }: { model: HubModelView; onDone: () => void
   const install = async (need: string) => {
     setBusy(true);
     try {
-      if (need === "llamacpp") await call("hub:tools", { action: "installLlamaCpp", backend: "cpu", packages: [] });
+      if (need === "llamacpp") await call("hub:tools", { action: "downloadLlamaCpp", backend: "auto", packages: [] });
       else if (need === "python") await call("hub:tools", { action: "setupPython", packages: [], backend: "cpu" });
       else {
         const env = need.startsWith("onnx:") ? "onnx" : "main";
@@ -456,10 +456,10 @@ function DeployForm({ model, onDone }: { model: HubModelView; onDone: () => void
                   ))}
                 </select>
                 <span className="w-[60px] text-right text-dim">Device</span>
-                <select className="input shrink-0" style={{ width: 100 }} data-testid="deploy-device" value={device} onChange={(e) => setDevice(e.target.value as "cpu" | "cuda")}>
+                <select className="input shrink-0" style={{ width: 100 }} data-testid="deploy-device" value={device} onChange={(e) => setDevice(e.target.value as "cpu" | "cuda" | "gpu")}>
                   {t.devices.map((d) => (
                     <option key={d} value={d}>
-                      {d}
+                      {d === "gpu" ? "GPU" : d}
                     </option>
                   ))}
                 </select>
@@ -610,7 +610,7 @@ function Tools({ tools }: { tools: HubStateView["tools"] }) {
   const toast = useApp((s) => s.toast);
   const [token, setToken] = useState("");
   const [pkgs, setPkgs] = useState("");
-  const run = (payload: { action: "probe" | "setupPython" | "installPackages" | "installLlamaCpp"; packages?: string[]; backend?: "cpu" | "cuda"; env?: "main" | "onnx" }) =>
+  const run = (payload: { action: "probe" | "setupPython" | "installPackages" | "installLlamaCpp" | "downloadLlamaCpp"; packages?: string[]; backend?: "cpu" | "cuda" | "gpu" | "auto"; env?: "main" | "onnx" }) =>
     call("hub:tools", { packages: [], backend: "cpu", env: "main", ...payload }).catch((e) => toast(errText(e)));
   const py = tools.python;
   const ox = tools.onnxPython;
@@ -699,16 +699,34 @@ function Tools({ tools }: { tools: HubStateView["tools"] }) {
             {l.server ? <Pill tone="ok">{l.backend}</Pill> : <Pill>not installed</Pill>}
             {l.version && <span className="mono text-[11px] text-faint">{l.version}</span>}
             <div className="flex-1" />
-            <button className="btn btn-sm" data-testid="llama-build-cpu" disabled={!!tools.installing} onClick={() => void run({ action: "installLlamaCpp", backend: "cpu" })}>
-              {l.server ? "Rebuild (CPU)" : "Build (CPU)"}
+            <button
+              className="btn btn-sm btn-primary"
+              data-testid="llama-download"
+              title="Prebuilt for this computer: CUDA on NVIDIA GPUs, Vulkan on other GPUs, Metal on Macs"
+              disabled={!!tools.installing}
+              onClick={() => void run({ action: "downloadLlamaCpp", backend: "auto" })}
+            >
+              {l.server ? "Update" : "Download"}
             </button>
-            {tools.cudaToolkit && (
-              <button className="btn btn-sm" disabled={!!tools.installing} onClick={() => void run({ action: "installLlamaCpp", backend: "cuda" })}>
-                Build (CUDA)
-              </button>
-            )}
+            <button className="btn btn-sm" data-testid="llama-download-cpu" disabled={!!tools.installing} onClick={() => void run({ action: "downloadLlamaCpp", backend: "cpu" })}>
+              CPU only
+            </button>
+            <details className="relative">
+              <summary className="btn btn-sm cursor-pointer list-none">Build from source</summary>
+              <div className="absolute right-0 z-10 mt-1 flex gap-1 rounded-[10px] border border-line bg-surface p-2 shadow">
+                <button className="btn btn-sm" data-testid="llama-build-cpu" disabled={!!tools.installing} onClick={() => void run({ action: "installLlamaCpp", backend: "cpu" })}>
+                  CPU
+                </button>
+                {tools.cudaToolkit && (
+                  <button className="btn btn-sm" disabled={!!tools.installing} onClick={() => void run({ action: "installLlamaCpp", backend: "cuda" })}>
+                    CUDA
+                  </button>
+                )}
+              </div>
+            </details>
           </div>
           {l.dir && <div className="mono mt-1 truncate text-[11px] text-faint">{l.dir}</div>}
+          {l.error && <div className="mt-1 text-[11.5px] text-err">{l.error}</div>}
           {l.server && (
             <div className="mt-1 text-[11.5px] text-dim">
               {l.quantTypes.length} quantization types · converter knows {l.convertArchitectures} architectures

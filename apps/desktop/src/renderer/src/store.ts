@@ -3,6 +3,9 @@ import type { BrowserState, ChatSummary, OrchestratorStatus, Settings, StoredMes
 import { call, errText } from "./api";
 import { applyEvent, type ContextUsage, type UiMessage } from "./chat/model";
 
+/** Last segment of an absolute folder path (Windows or POSIX separators). */
+export const baseName = (p: string): string => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
+
 export type Activity = "explorer" | "search" | "git" | "chats" | "team" | "hub" | "memory" | "settings";
 
 export interface Tab {
@@ -62,6 +65,10 @@ export interface AppState {
   loadSettings(): Promise<void>;
   updateSettings(patch: Record<string, unknown>): Promise<void>;
   openWorkspace(root: string): Promise<void>;
+  /** Folder picker, then opens the folder here (or in another window with `newWindow`). */
+  pickFolder(opts?: { newWindow?: boolean }): Promise<void>;
+  /** Starts another IDE window, on `root` if given. */
+  newWindow(root?: string): Promise<void>;
   openFile(path: string, opts?: { line?: number }): Promise<void>;
   openDiff(path: string, before: string, after: string, editId?: string): void;
   closeTab(id: string): void;
@@ -179,8 +186,28 @@ export const useApp = create<AppState>((set, get) => ({
       await get().loadSettings();
       await get().refreshChats();
       await get().refreshGit();
-      const chats = get().chats;
-      if (chats[0]) await get().selectChat(chats[0].id);
+      // Chats are per project: the list now holds only this folder's chats, and none may stay selected from another.
+      await get().selectChat(get().chats[0]?.id ?? null);
+    } catch (e) {
+      get().toast(errText(e), "error");
+    }
+  },
+
+  async pickFolder(opts) {
+    try {
+      const root = await call<string | null>("dialog:openFolder", {});
+      if (!root) return;
+      if (opts?.newWindow) await get().newWindow(root);
+      else await get().openWorkspace(root);
+    } catch (e) {
+      get().toast(errText(e), "error");
+    }
+  },
+
+  async newWindow(root) {
+    try {
+      await call<boolean>("app:newWindow", root ? { root } : {});
+      get().toast(root ? `Opening ${baseName(root)} in a new window…` : "Opening a new window…");
     } catch (e) {
       get().toast(errText(e), "error");
     }

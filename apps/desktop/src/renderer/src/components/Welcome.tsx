@@ -6,7 +6,7 @@ import { Circles, PersonLaptop } from "../ui/LineArt";
 import { IFolder, IGear, ITeam, IDownload } from "../ui/icons";
 
 export function Welcome() {
-  const { settings, openWorkspace, set } = useApp();
+  const { settings, openWorkspace, pickFolder, set } = useApp();
   const [models, setModels] = useState<LocalModelStatus[]>([]);
   useEffect(() => {
     call<LocalModelStatus[]>("models:status", {}).then(setModels, () => undefined);
@@ -14,11 +14,6 @@ export function Welcome() {
   const recent = settings?.recentWorkspaces ?? [];
   const missing = models.filter((m) => !m.installed);
   const usesLocal = settings?.providers.find((p) => p.id === settings.models.find((m) => m.id === settings.roles.agent)?.providerId)?.kind === "local_onnx";
-
-  const open = async () => {
-    const root = await call<string | null>("dialog:openFolder", {});
-    if (root) await openWorkspace(root);
-  };
 
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden bg-bg fade-in">
@@ -35,7 +30,7 @@ export function Welcome() {
             A local-first agent that plans in a live Python REPL, remembers what matters, and asks before it touches your files.
           </p>
           <div className="mt-8 flex gap-3">
-            <button className="btn btn-primary" style={{ height: 42, padding: "0 26px" }} onClick={open}>
+            <button className="btn btn-primary" style={{ height: 42, padding: "0 26px" }} onClick={() => void pickFolder()} data-testid="welcome-open">
               <IFolder size={15} /> Open folder
             </button>
             <button className="btn" style={{ height: 42, padding: "0 22px" }} onClick={() => set({ activity: "team" })} data-testid="welcome-team">

@@ -2,8 +2,12 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import m001 from "./migrations/001_init.sql?raw";
+import m002 from "./migrations/002_chat_workspace.sql?raw";
 
-const MIGRATIONS: Array<{ version: number; sql: string }> = [{ version: 1, sql: m001 }];
+const MIGRATIONS: Array<{ version: number; sql: string }> = [
+  { version: 1, sql: m001 },
+  { version: 2, sql: m002 },
+];
 
 export interface Db {
   raw: DatabaseSync;
@@ -26,12 +30,16 @@ export function openDb(file: string, vecExtensionPath: string | null): Db {
     }
   }
   raw.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
-  const row = raw.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number | null } | undefined;
-  const current = row?.v ?? 0;
+  const version = () => (raw.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number | null } | undefined)?.v ?? 0;
   for (const m of MIGRATIONS) {
-    if (m.version <= current) continue;
-    raw.exec("BEGIN");
+    if (m.version <= version()) continue;
+    // IMMEDIATE takes the write lock first: another copy of the IDE starting at the same moment waits, then skips.
+    raw.exec("BEGIN IMMEDIATE");
     try {
+      if (m.version <= version()) {
+        raw.exec("COMMIT");
+        continue;
+      }
       raw.exec(m.sql);
       raw.prepare("INSERT INTO schema_version (version) VALUES (?)").run(m.version);
       raw.exec("COMMIT");

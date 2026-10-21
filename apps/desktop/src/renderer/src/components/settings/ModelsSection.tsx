@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { BUILTIN, type LocalModelStatus, type ModelConfig, type ProviderConfig, type Settings } from "@rlm/contracts";
+import { agentPickerModels, BUILTIN, type LocalModelStatus, type ModelConfig, type ProviderConfig, type Settings } from "@rlm/contracts";
 import { api, call, errText } from "../../api";
+import { selectAgentModel } from "../../models";
 import { useApp } from "../../store";
 import { IDownload, IPlus, ITrash } from "../../ui/icons";
 import { Bytes, Num, Row, Section, Select, Text } from "./fields";
@@ -29,7 +30,7 @@ export function ModelsSection({ s }: { s: Settings }) {
     <>
       <Section title="Roles" hint="Pick a model for each job. Any role can use the built-in local models or an OpenAI-compatible API.">
         <Row label="Agent" hint="Plans, writes REPL cells, and answers.">
-          <Select value={s.roles.agent} width={260} options={chat.map((m) => [m.id, m.label])} onChange={(v) => setRole("agent", v)} />
+          <Select value={s.roles.agent} width={260} options={agentPickerModels(s).map((m) => [m.id, m.label])} onChange={(v) => void selectAgentModel(v)} />
         </Row>
         <Row label="Summarizer" hint="Writes compaction checkpoints and distills memory facts. Empty = same as agent.">
           <Select value={s.roles.summarizer} width={260} options={[["", "Same as agent"], ...chat.map((m) => [m.id, m.label] as [string, string])]} onChange={(v) => setRole("summarizer", v)} />

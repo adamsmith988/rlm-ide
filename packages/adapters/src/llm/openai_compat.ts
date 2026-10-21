@@ -18,7 +18,7 @@ export interface OpenAICompatConfig {
 }
 
 /** Aborts `ctl` when `touch()` isn't called for `ms`; the reason names the stall. */
-function stallGuard(ctl: AbortController, ms: number | undefined, what: string): { touch: () => void; done: () => void } {
+export function stallGuard(ctl: AbortController, ms: number | undefined, what: string): { touch: () => void; done: () => void } {
   if (!ms) return { touch: () => undefined, done: () => undefined };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const touch = () => {
@@ -29,7 +29,7 @@ function stallGuard(ctl: AbortController, ms: number | undefined, what: string):
   return { touch, done: () => clearTimeout(timer) };
 }
 
-function headers(key: string | null): Record<string, string> {
+export function headers(key: string | null): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   if (key) h.Authorization = `Bearer ${key}`;
   return h;

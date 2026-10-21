@@ -31,12 +31,16 @@ export class LocalBridgeChat implements ChatModelPort {
     const id = `gen_${++seq}_${Date.now().toString(36)}`;
     const queue: InferenceResponse[] = [];
     let wake: (() => void) | null = null;
+    // id "*": the runtime itself failed (crashed, out of GPU memory); every request in flight ends with it.
     const off = this.transport.onMessage((m) => {
-      if (m.id !== id) return;
+      if (m.id !== id && m.id !== "*") return;
       queue.push(m);
       wake?.();
     });
-    const onAbort = () => this.transport.send({ type: "abort", id });
+    const onAbort = () => {
+      this.transport.send({ type: "abort", id });
+      wake?.();
+    };
     req.signal?.addEventListener("abort", onAbort, { once: true });
     this.transport.send({
       type: "generate",

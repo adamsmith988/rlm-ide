@@ -24,6 +24,7 @@ import type { ToolExecutor, TurnToolScope } from "../tool_executor";
 import { newId } from "../memory_service";
 import { CellFenceFilter, extractCells, retriedCell, retriedCellText, sameErrorHint, stripCells, stripThinking, syntaxHint, timeoutHint, unclosedCellAt, type FailedCell } from "./cells";
 import { buildMessages, estimate, toUnits, truncateOldOutputs, type HostBlocks } from "./transcript";
+import { ReplyGuard, type CutReason } from "./guard";
 
 export interface RlmTurnInput {
   chatId: string;
@@ -67,6 +68,8 @@ interface Session {
   chatId: string;
   entries: TranscriptEntry[];
   kernel: KernelSession | null;
+  /** Folder the kernel was started in; a kernel never serves another project. */
+  kernelRoot?: string;
   lastTurnIdx: number;
   depth: number;
   /** The kernel outlives turns; host requests are routed through the turn currently running. */
@@ -163,7 +166,7 @@ export class RlmEngine {
     if (input.verbatim.length || input.checkpoint) {
       entries.push({ kind: "note", turnIdx: input.turnIdx, text: this.deps.prompts.get("rlm/restart_note.md").trim() });
     }
-    const session: Session = { chatId: input.chatId, entries, kernel: warm?.kernel ?? null, lastTurnIdx: lastStored, depth: 0 };
+    const session: Session = { chatId: input.chatId, entries, kernel: warm?.kernel ?? null, kernelRoot: warm?.kernelRoot, lastTurnIdx: lastStored, depth: 0 };
     this.sessions.set(input.chatId, session);
     return { session, restored: "reseed" };
   }
@@ -175,6 +178,15 @@ export class RlmEngine {
     await this.deps.snapshots.delete(chatId).catch(() => undefined);
   }
 
+  async shutdownIdleKernels(busy: (chatId: string) => boolean): Promise<void> {
+    for (const s of this.sessions.values()) {
+      if (!s.kernel || busy(s.chatId)) continue;
+      const k = s.kernel;
+      s.kernel = null;
+      await k.shutdown().catch(() => undefined);
+    }
+  }
+
   async shutdownAll(): Promise<void> {
     for (const s of this.sessions.values()) await s.kernel?.shutdown().catch(() => undefined);
     this.sessions.clear();
@@ -183,8 +195,8 @@ export class RlmEngine {
   async runTurn(input: RlmTurnInput): Promise<RlmTurnOutput> {
     const { session, restored } = await this.acquireSession(input);
     if (restored !== "warm") input.emit({ type: "status", text: `RLM session restored (${restored})` });
-    session.entries.push({ kind: "user", text: input.userText, turnIdx: input.turnIdx });
     const children = new Semaphore(input.rlm.maxConcurrentChildren);
+    session.entries.push({ kind: "user", text: await this.userEntryText(session, input, children), turnIdx: input.turnIdx });
     try {
       const out = await this.loop(session, input, [], input.toolIds, children);
       session.lastTurnIdx = input.turnIdx;
@@ -200,6 +212,35 @@ export class RlmEngine {
     }
   }
 
+  /** A message too large for a comfortable prompt goes into the REPL as `user_message`; the transcript gets its
+   * start and end and how to work with it. A model handed a document that fills its window mostly reasons in
+   * circles; slicing and searching it in code is the RLM way through. */
+  private async userEntryText(session: Session, input: RlmTurnInput, children: Semaphore): Promise<string> {
+    const text = input.userText;
+    const tokens = estimateTokens(text);
+    if (tokens <= input.limits.contextLength * input.rlm.largeInputShare) return text;
+    try {
+      const kernel = await this.ensureKernel(session, input, [], input.toolIds, children);
+      const b64 = Buffer.from(text, "utf8").toString("base64");
+      const r = await kernel.execute(`import base64 as _b64\nuser_message = _b64.b64decode("${b64}").decode("utf-8")\ndel _b64`, () => undefined, 60_000);
+      if (!r.ok) throw new Error(r.error ?? "could not load the message into the REPL");
+    } catch (e) {
+      this.deps.log.warn("large message stays in the prompt", String(e));
+      return text;
+    }
+    const preview = Math.max(500, Math.min(4000, charsForTokens(input.limits.contextLength * 0.04)));
+    const head = text.slice(0, preview);
+    const tail = text.slice(-Math.floor(preview / 3));
+    input.emit({ type: "status", text: `Your message (~${tokens} tokens) was handed to the REPL as user_message; the agent reads it in parts` });
+    return render(this.deps.prompts.get("rlm/large_input.md"), {
+      chars: String(text.length),
+      tokens: String(tokens),
+      head,
+      tail,
+      omitted: String(Math.max(0, text.length - head.length - tail.length)),
+    }).trim();
+  }
+
   private systemPrompt(toolIds: Set<string>, depth: number, rlm: RlmSettings, compact = false): string {
     const tools = this.deps.tools().filter((t) => toolIds.has(t.id));
     return render(this.deps.prompts.get(depth === 0 ? "rlm/system.md" : "rlm/subagent.md"), {
@@ -211,8 +252,10 @@ export class RlmEngine {
 
   private async ensureKernel(session: Session, input: RlmTurnInput, agentPath: string[], toolIds: Set<string>, children: Semaphore): Promise<KernelSession> {
     session.binding = { input, agentPath, toolIds, children };
-    if (session.kernel?.isAlive()) return session.kernel;
+    if (session.kernel?.isAlive() && session.kernelRoot === input.workspaceRoot) return session.kernel;
+    await session.kernel?.shutdown().catch(() => undefined);
     const tools = this.deps.tools().filter((t) => toolIds.has(t.id));
+    session.kernelRoot = input.workspaceRoot;
     session.kernel = await this.deps.kernels.create({
       cwd: input.workspaceRoot,
       tools,
@@ -274,6 +317,11 @@ export class RlmEngine {
     const workLog: string[] = [];
     let lastText = "";
     let overflows = 0;
+    /** Replies cut off in a row (reasoning too long, or repeating); the next request runs without reasoning. */
+    let cuts = 0;
+    let calmNext: CutReason | null = null;
+    /** Cells run this turn and their last output, to spot a model running the same thing over and over. */
+    const ran = new Map<string, { times: number; out: string }>();
     let edited = false;
     let reviewed = false;
     const editedPages = new Set<string>();
@@ -304,6 +352,18 @@ export class RlmEngine {
 
       let raw = "";
       const filter = new CellFenceFilter();
+      const guard = new ReplyGuard({
+        thinkingMaxChars: charsForTokens(Math.max(256, Math.min(input.rlm.thinkingMaxTokens, Math.floor(maxTokens * input.rlm.thinkingMaxShare)))),
+        thinkingMaxMs: input.rlm.thinkingMaxSec * 1000,
+        repeatLimit: input.rlm.repeatLimit,
+      });
+      let cutBy: CutReason | null = null;
+      const stopper = new AbortController();
+      const stopCut = () => stopper.abort();
+      input.signal.addEventListener("abort", stopCut, { once: true });
+      const enableThinking = calmNext ? false : undefined;
+      const temperature = calmNext === "repeating" ? 0.7 : 0.3;
+      calmNext = null;
       try {
         const started = Date.now();
         let outChars = 0;
@@ -324,12 +384,13 @@ export class RlmEngine {
           }
         };
         progress(true);
-        for await (const c of model.stream({ messages, maxTokens, signal: input.signal, temperature: 0.3 })) {
+        for await (const c of model.stream({ messages, maxTokens, signal: stopper.signal, temperature, enableThinking })) {
           if (c.type === "thinking") {
             outChars += c.text.length;
             phase = "thinking";
             if (isRoot) input.emit({ type: "thinking_delta", text: c.text });
             progress();
+            if ((cutBy = guard.push("thinking", c.text))) break;
           } else if (c.type === "text") {
             raw += c.text;
             outChars += c.text.length;
@@ -337,6 +398,7 @@ export class RlmEngine {
             phase = filter.draft() !== null ? "writing_code" : "writing";
             if (visible && isRoot) input.emit({ type: "text_delta", text: visible });
             progress();
+            if ((cutBy = guard.push("text", c.text))) break;
           } else if (c.type === "usage") {
             counted += c.inputTokens;
             usage.inputTokens += c.inputTokens;
@@ -350,7 +412,7 @@ export class RlmEngine {
           }
         }
         const rest = filter.flush();
-        if (rest && isRoot) input.emit({ type: "text_delta", text: rest });
+        if (rest && isRoot && !cutBy) input.emit({ type: "text_delta", text: rest });
         calibrate(session, estimated, counted);
         overflows = 0;
       } catch (e) {
@@ -369,10 +431,35 @@ export class RlmEngine {
           step--;
           continue;
         }
-        throw e;
+        // Closing a reply we cut off can surface as an abort from the transport.
+        if (!(cutBy && !input.signal.aborted)) throw e;
+      } finally {
+        input.signal.removeEventListener("abort", stopCut);
+        stopper.abort();
       }
       if (!usage.outputTokens) usage.outputTokens += estimateTokens(raw);
       if (!usage.inputTokens) usage.inputTokens += inputTokens;
+
+      if (cutBy) {
+        cuts++;
+        const tokens = Math.round(guard.thinkingSoFar / 4);
+        this.deps.log.warn("model reply cut off", { reason: cutBy, step: step + 1, thinkingTokens: tokens, cutsInARow: cuts });
+        if (cuts > input.rlm.maxCutsInARow) {
+          const why = cutBy === "repeating" ? "kept repeating itself" : "kept reasoning without acting";
+          const advice = `The model ${why} ${cuts} times in a row, so this turn was stopped. A larger model, or a shorter, more specific request, usually helps.`;
+          return { finalText: lastText ? `${lastText}\n\n(${advice})` : advice, workLog: workLog.join("\n"), steps: step + 1, usage };
+        }
+        if (isRoot) input.emit({ type: "status", text: cutBy === "repeating" ? "The model started repeating itself; asking it to take a different step" : `The model reasoned for ~${tokens} tokens without acting; asking it to act` });
+        // Its partial reply never ran; the note alone tells it what happened.
+        session.entries.push({
+          kind: "note",
+          text: render(this.deps.prompts.get(cutBy === "repeating" ? "rlm/cut_repeating.md" : "rlm/cut_thinking.md"), { tokens: String(tokens) }).trim(),
+          turnIdx: input.turnIdx,
+        });
+        calmNext = cutBy;
+        continue;
+      }
+      cuts = 0;
 
       let text = stripThinking(raw);
       const cutAt = unclosedCellAt(text);
@@ -441,6 +528,15 @@ export class RlmEngine {
           workLog.push(`cell: ${clipChars(code.split("\n").slice(0, 3).join(" | "), 160)} -> not run (re-sent failing cell)`);
           break;
         }
+        const seen = ran.get(code.trim());
+        if (seen && seen.times >= input.rlm.maxIdenticalCells) {
+          const text = `[not run] This exact cell already ran ${seen.times} times in this turn with the same output each time; running it again shows nothing new. Use that output and take a different step, or answer.`;
+          input.emit({ type: "cell_output", cellId, stream: "stderr", text: `${text}\n` });
+          input.emit({ type: "cell_done", cellId, ok: false, error: text, durationMs: 0 });
+          outputs.push(text);
+          workLog.push(`cell: ${clipChars(code.split("\n").slice(0, 3).join(" | "), 160)} -> not run (identical repeat)`);
+          break;
+        }
         this.deps.status.kernel("busy");
         const started = Date.now();
         const onAbort = () => void kernel.interrupt();
@@ -460,7 +556,10 @@ export class RlmEngine {
         if (r.ok) session.failedCell = undefined;
         else if (r.error && !didNotParse && !r.interrupted && !r.timedOut) session.failedCell = { code, error: r.error };
         const parts = [r.stdout, r.stderr ? `[stderr]\n${r.stderr}` : "", r.result ? `[result] ${r.result}` : "", r.error ? `[error]\n${r.error}` : "", r.error ? syntaxHint(code, r.error) : "", repeated, retryNote, noticeText, r.timedOut ? timeoutHint(input.rlm.cellTimeoutSec) : ""].filter(Boolean);
-        const out = clipChars(parts.join("\n").trim() || "(no output)", Math.min(input.rlm.cellOutputLimitChars, charsForTokens(input.limits.contextLength * input.rlm.cellOutputMaxShare)));
+        let out = clipChars(parts.join("\n").trim() || "(no output)", Math.min(input.rlm.cellOutputLimitChars, charsForTokens(input.limits.contextLength * input.rlm.cellOutputMaxShare)));
+        const times = seen && seen.out === out ? seen.times + 1 : 1;
+        ran.set(code.trim(), { times, out });
+        if (times > 1) out += `\n[hint] You already ran this exact cell ${times - 1} time(s) in this turn and got this same output. Running it again will not tell you more: use it and move on.`;
         outputs.push(out);
         workLog.push(`cell: ${clipChars(code.split("\n").slice(0, 3).join(" | "), 160)} -> ${clipChars(out.replace(/\n/g, " "), 200)}`);
         if (!r.ok && (r.interrupted || r.timedOut)) break;

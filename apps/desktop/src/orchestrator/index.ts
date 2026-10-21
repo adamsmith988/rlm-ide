@@ -27,6 +27,7 @@ import {
   type InferenceResponse,
   type InferenceTransport,
 } from "@rlm/adapters";
+import { cpuThreads } from "@rlm/inference/src/cpu";
 import { BgeM3Embedder } from "@rlm/inference/src/embed_bge";
 
 interface ParentPort {
@@ -95,6 +96,7 @@ class PortTransport implements InferenceTransport {
     for (const w of this.waiters) w.reject(new Error(reason));
     this.waiters = [];
     this.requested = false;
+    for (const l of this.listeners) l({ type: "error", id: "*", message: reason });
   }
 
   reset(): void {
@@ -146,8 +148,11 @@ function init(i: Record<string, unknown>): void {
   const db = openDb(String(i.dbPath), (i.vecExtension as string | null) ?? null);
   log.info(`database ready (sqlite-vec ${db.vecLoaded ? "loaded" : "unavailable; using JS vector math"})`);
   repo = new SqliteConversationRepo(db);
-  const recovered = repo.recoverInterrupted();
-  if (recovered) log.warn(`marked ${recovered} interrupted turn(s) as cancelled`);
+  // Only the first copy of the IDE on a profile does this: turns running in another copy are not interrupted.
+  if (i.recoverTurns !== false) {
+    const recovered = repo.recoverInterrupted();
+    if (recovered) log.warn(`marked ${recovered} interrupted turn(s) as cancelled`);
+  }
   memoryStore = new SqliteMemoryStore(db);
   edits = new SqliteEditJournal(db);
   pinned = new SqlitePinnedFacts(db);
@@ -168,7 +173,7 @@ function init(i: Record<string, unknown>): void {
       if (!root) return null;
       let e = embedders.get(model.id);
       if (!e) {
-        e = new BgeM3Embedder(root, model.name, model.dim ?? BUILTIN.embedDim);
+        e = new BgeM3Embedder(root, model.name, model.dim ?? BUILTIN.embedDim, () => settings.local.embedMaxTokens, () => cpuThreads(settings.local.cpuThreads));
         embedders.set(model.id, e);
       }
       return e;
@@ -268,10 +273,21 @@ function scope() {
   return { user_id: settings.userId };
 }
 
+/** Long-term facts visible in the open project: the same set the agent recalls from. */
+function factScope() {
+  return orch!.memory.longTermFilter({ userId: settings.userId, sessionId: "", workspaceId: workspace!.root() }, settings.memory);
+}
+
 type Handler = (a: Record<string, unknown>) => Promise<unknown> | unknown;
 
 const methods: Record<string, Handler> = {
-  "workspace:set": (a) => workspace!.set(String(a.root)),
+  "workspace:set": async (a) => {
+    const root = String(a.root);
+    const changed = workspace!.root() !== root;
+    const r = workspace!.set(root);
+    if (changed) await orch!.workspaceChanged();
+    return r;
+  },
   "kernel:sandbox": () => kernels!.sandboxInfo(),
   "chat:list": () => orch!.listChats(),
   "chat:create": (a) => orch!.createChat(String(a.title ?? "New chat")),
@@ -303,7 +319,7 @@ const methods: Record<string, Handler> = {
   "pinned:upsert": (a) => pinned!.upsert({ id: a.id as string | undefined, chatId: String(a.chatId), kind: a.kind as "goal", text: String(a.text) }),
   "pinned:delete": (a) => pinned!.delete(String(a.id)),
   "memory:list": async (a) => {
-    const pts = await memoryStore!.list({ ...scope(), memory_type: "long_term" }, String(a.query ?? "") || undefined);
+    const pts = await memoryStore!.list(factScope(), String(a.query ?? "") || undefined);
     return pts.map((p) => ({
       id: p.id,
       text: p.payload.text,
@@ -316,28 +332,39 @@ const methods: Record<string, Handler> = {
     }));
   },
   "memory:add": async (a) => {
-    const p = await orch!.memory.addFact({ userId: settings.userId, sessionId: "", workspaceId: workspace!.root() }, String(a.text), String(a.category ?? "preference"));
+    const about = a.about === "project" && workspace!.root() ? "project" : "user";
+    const p = await orch!.memory.addFact({ userId: settings.userId, sessionId: "", workspaceId: workspace!.root() }, String(a.text), String(a.category ?? (about === "project" ? "project" : "preference")), undefined, undefined, about);
     return p.id;
   },
-  "memory:update": (a) => orch!.memory.updateFact(String(a.id), String(a.text), { ...scope(), memory_type: "long_term" }, settings.memory),
-  "memory:delete": (a) => memoryStore!.delete([String(a.id)], { ...scope(), memory_type: "long_term" }),
+  "memory:update": (a) => orch!.memory.updateFact(String(a.id), String(a.text), factScope(), settings.memory),
+  "memory:delete": (a) => memoryStore!.delete([String(a.id)], factScope()),
   "memory:forgetAll": async () => {
     await memoryStore!.deleteAll({ ...scope(), memory_type: "long_term" });
     await memoryStore!.deleteAll({ ...scope(), memory_type: "short_term" });
     return true;
   },
-  "memory:export": async () => JSON.stringify((await memoryStore!.list({ ...scope(), memory_type: "long_term" })).map((p) => ({ text: p.payload.text, category: p.payload.category, history: p.payload.history })), null, 2),
+  "memory:export": async () =>
+    JSON.stringify(
+      (await memoryStore!.list(factScope())).map((p) => ({ text: p.payload.text, category: p.payload.category, about: p.payload.workspace_id ? "project" : "user", history: p.payload.history })),
+      null,
+      2,
+    ),
   "memory:import": async (a) => {
-    const arr = JSON.parse(String(a.json)) as Array<{ text: string; category?: string }>;
-    for (const f of arr) if (f.text) await orch!.memory.addFact({ userId: settings.userId, sessionId: "", workspaceId: workspace!.root() }, f.text, f.category ?? "imported");
+    const arr = JSON.parse(String(a.json)) as Array<{ text: string; category?: string; about?: string }>;
+    const root = workspace!.root();
+    for (const f of arr)
+      if (f.text) await orch!.memory.addFact({ userId: settings.userId, sessionId: "", workspaceId: root }, f.text, f.category ?? "imported", undefined, undefined, f.about === "project" && root ? "project" : "user");
     return arr.length;
   },
   "memory:stats": async () => {
-    const facts = (await memoryStore!.list({ ...scope(), memory_type: "long_term" })).length;
+    const facts = (await memoryStore!.list(factScope())).length;
     const chats = (await orch!.listChats()).length;
     return { facts, chats, collections: memoryStore!.collections() };
   },
-  "edits:list": () => edits!.list(),
+  "edits:list": () => {
+    const root = workspace!.root();
+    return root ? edits!.list(root) : [];
+  },
   "edits:resolve": async (a) => {
     const e = await edits!.get(String(a.editId));
     if (!e) throw new Error("edit not found");

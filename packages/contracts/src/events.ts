@@ -21,6 +21,8 @@ export interface RecalledMemory {
   text: string;
   memoryType: "short_term" | "long_term";
   score: number;
+  /** Long-term facts: about the user (every project) or about the open project. */
+  about?: "user" | "project";
 }
 
 export type TurnEventBody =

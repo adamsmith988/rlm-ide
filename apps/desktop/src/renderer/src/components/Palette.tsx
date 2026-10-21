@@ -44,10 +44,9 @@ export function Palette() {
 
   const commands: Item[] = useMemo(
     () => [
-      { id: "open", label: "Open folder…", run: async () => {
-          const root = await call<string | null>("dialog:openFolder", {});
-          if (root) await st.openWorkspace(root);
-        } },
+      { id: "open", label: "Open folder…", hint: "Ctrl O", run: () => void st.pickFolder() },
+      { id: "open-new", label: "Open folder in new window…", run: () => void st.pickFolder({ newWindow: true }) },
+      { id: "new-window", label: "New window", run: () => void st.newWindow() },
       { id: "chat", label: "New chat", hint: "Ctrl Shift N", run: () => void st.newChat() },
       { id: "agent", label: "Focus agent", hint: "Ctrl L", run: () => (st.set({ agent: true }), setTimeout(() => document.getElementById("composer")?.focus(), 30)) },
       { id: "sidebar", label: "Toggle sidebar", hint: "Ctrl B", run: () => st.set({ sidebar: !st.sidebar }) },

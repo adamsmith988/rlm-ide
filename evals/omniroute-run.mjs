@@ -10,7 +10,7 @@
  *        default evals/.runtimes/omniroute-live)
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -209,6 +209,21 @@ function evalKey(port) {
   return JSON.parse(lines.slice(lines.findIndex((l) => l.startsWith("{"))).join("\n")).key;
 }
 
+/** The first chained model that answers right now: free providers come and go, and the fault proxy needs a working
+ * upstream to cut. Falls back to the head of the chain. */
+async function answeringModel(key, port, chain) {
+  for (const m of chain) {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: m.id, messages: [{ role: "user", content: "Say ok." }], max_tokens: 16, stream: false }),
+      signal: AbortSignal.timeout(60_000),
+    }).catch(() => null);
+    if (r?.ok) return m;
+  }
+  return chain[0];
+}
+
 const MEMORY_FACT = "The user's deploy target is the staging cluster BLUEJAY.";
 const REPL_PROMPT = "First run a REPL cell that computes sum(i*i for i in range(1, 101)) and prints it. After you see its output, reply with one sentence that states the number and my deploy target.";
 const PRIMES = "2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47";
@@ -238,7 +253,9 @@ async function main() {
     const t0 = Date.now();
     await until("return window.rlm.invoke('omniroute:state', {}).then((s) => !s.busy && s.phase !== 'installing')", 45 * 60_000, "install");
     v = await state();
-    check("install", "install finishes from the UI", !!v.version && v.phase === "stopped", `${v.version ?? v.error} in ${Math.round((Date.now() - t0) / 60000)} min`);
+    check("install", "install finishes from the UI and starts the gateway", !!v.version && v.phase === "running", `${v.version ?? v.error} in ${Math.round((Date.now() - t0) / 60000)} min`);
+    const after = await settingsNow();
+    check("install", "OmniRoute is in the model list right after install", after.models.some((m) => m.id === "omniroute:auto" && m.kind === "chat"), after.models.map((m) => m.id).join(", "));
   }
   if (v.phase === "starting") {
     note("the gateway is starting with the IDE");
@@ -312,9 +329,18 @@ async function main() {
   const primary = s.models.find((m) => m.id === chainIds[0]);
   check(
     "setup",
-    "the first chain model is the agent and the rest are its backups, in order",
-    s.roles.agent === chainIds[0] && chainIds.slice(1).every((id, i) => s.roles.agentFallbacks[i] === id),
-    `${s.roles.agent} → ${s.roles.agentFallbacks.join(", ")}`,
+    "the agent's model is OmniRoute, which switches through the chain in order",
+    s.roles.agent === "omniroute:auto" && chainIds.length === s.omniroute.chain.length && chainIds.every((id, i) => s.omniroute.chain[i] === id),
+    `${s.roles.agent} = ${s.omniroute.chain.join(" → ")}; then ${s.roles.agentFallbacks.join(", ") || "nothing"}`,
+  );
+  await app.cdp.click("[data-testid=activity-explorer]");
+  const options = await until("const o = [...document.querySelectorAll('select[title=\"Agent model\"] option')].map((o) => o.value); return o.length ? o : null", 15000, "agent model picker");
+  await openFreeModels();
+  check(
+    "setup",
+    "the chat's model list shows one OmniRoute entry instead of every free model",
+    options.includes("omniroute:auto") && !options.some((id) => id.startsWith("omniroute:") && id !== "omniroute:auto"),
+    options.join(", "),
   );
   const lost = tested.filter((m) => m.ok === false && /forget its memory/.test(m.error ?? ""));
   check(
@@ -379,7 +405,11 @@ async function main() {
   else skip("rlm", "the answer uses the REPL result", rlm.text.slice(0, 120));
 
   note("fault injection: a primary that drops the stream mid-reply");
-  const proxy = await faultProxy(evalKey(port), port, chain[0].id);
+  const proxyKey = evalKey(port);
+  const target = await answeringModel(proxyKey, port, chain);
+  const upstream = s.models.find((m) => m.id === `omniroute:${target.id}`) ?? primary;
+  console.log(`  fault proxy in front of ${target.id}`);
+  const proxy = await faultProxy(proxyKey, port, target.id);
   await app.cdp.invoke("settings:update", {
     patch: {
       providers: [
@@ -400,10 +430,10 @@ async function main() {
           name: "primary",
           label: "Flaky primary",
           kind: "chat",
-          contextLength: primary.contextLength,
-          maxOutputTokens: primary.maxOutputTokens,
+          contextLength: upstream.contextLength,
+          maxOutputTokens: upstream.maxOutputTokens,
           dim: null,
-          ...(primary.systemAsUser ? { systemAsUser: true } : {}),
+          ...(upstream.systemAsUser ? { systemAsUser: true } : {}),
         },
       ],
     },
@@ -527,7 +557,8 @@ async function main() {
   const walk = (d) => {
     for (const n of readdirSync(d)) {
       const p = path.join(d, n);
-      const st = statSync(p);
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) {
         // The gateway's own data and code are its business; the IDE's files must not hold keys.
         if (p === path.join(userData, "omniroute") || n === "node_modules") continue;

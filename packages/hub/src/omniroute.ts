@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   CHARS_PER_TOKEN,
   foldSystemPrompt,
+  OMNIROUTE_AUTO_MODEL_ID,
   type ModelConfig,
   type OmniRouteConnectionView,
   type OmniRouteModelView,
@@ -28,6 +29,8 @@ export interface OmniRouteDeps {
   dir: string;
   settings: () => Settings;
   updateSettings: (patch: Partial<Settings>) => void;
+  /** True in every copy of the IDE but the first on this profile: the first one runs the gateway. */
+  follower?: () => boolean;
   secrets: {
     get(name: string): string | null;
     set(name: string, value: string): void;
@@ -48,6 +51,11 @@ export interface OmniRouteDeps {
 const MAX_CHARS_RE = /max(?:imum)?\s*(?:of\s*)?(\d{3,})\s*char/i;
 /** Input-size refusals as providers word them (DuckDuckGo's arrives as a 429 "ERR_INPUT_LIMIT"). */
 const INPUT_LIMIT_RE = /ERR_INPUT_LIMIT|too long|context.length|maximum context|too many tokens|input limit/i;
+
+/** Failures that mean "busy", not "too big". */
+const BUSY_RE = /\b429\b|rate.?limit|too many requests|quota|timed? ?out|timeout|aborted/i;
+
+type Holds = { ok: true } | { ok: false; maxChars: number | null; sizeLimit: boolean; error: string };
 
 /** Tasks only a REPL cell can do, so a model that follows the agent protocol must write one. */
 const AGENT_TASKS = ["Run a REPL cell that prints the result of 17 * 23.", "How many files are in the project root folder?"];
@@ -429,7 +437,34 @@ export class OmniRouteService {
     this.set({ phase: "stopped" });
     const s = this.d.settings();
     const registered = s.providers.some((p) => p.id === OMNIROUTE_PROVIDER_ID && p.managed === "omniroute");
-    if (s.omniroute.autoStart && registered && this.view.node.ok) await this.start().catch((e: unknown) => this.d.log(`auto-start failed: ${String(e)}`));
+    if (!s.omniroute.autoStart || !registered || !this.view.node.ok) return;
+    if (this.d.follower?.()) {
+      // The first copy of the IDE starts the gateway; wait for it instead of racing it for the port.
+      for (let i = 0; i < 60 && !this.closing; i++) {
+        if (await this.adopt()) return;
+        await sleep(2000);
+      }
+      return;
+    }
+    await this.start().catch((e: unknown) => this.d.log(`auto-start failed: ${String(e)}`));
+  }
+
+  /** Uses a gateway another copy of the IDE runs on our port with our key; it stays theirs to stop. */
+  private async adopt(): Promise<boolean> {
+    const key = this.d.secrets.get(KEY_SECRET);
+    if (!key || !(await this.health())) return false;
+    const ok = await fetch(`http://127.0.0.1:${this.port()}/v1/models`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(10_000),
+    }).then(
+      (r) => r.ok,
+      () => false,
+    );
+    if (!ok) return false;
+    this.register();
+    this.set({ phase: "running", busy: null, error: null, version: this.installedVersion() });
+    void this.refreshCatalog().catch((e: unknown) => this.d.log(`catalog: ${String(e)}`));
+    return true;
   }
 
   async install(): Promise<OmniRouteView> {
@@ -468,7 +503,6 @@ export class OmniRouteService {
         version: this.installedVersion(),
         busy: null,
       });
-      return this.state();
     } catch (e) {
       this.set({
         phase: this.installedVersion() ? "stopped" : "not_installed",
@@ -477,6 +511,12 @@ export class OmniRouteService {
       });
       throw e;
     }
+    // Ready to pick right away: the gateway runs and the "OmniRoute" model gets its tested chain in the background.
+    await this.start().catch((e: unknown) => this.d.log(`start after install failed: ${String(e)}`));
+    if (this.view.phase === "running" && !this.d.settings().omniroute.chain.length) {
+      void this.setup([], false).catch((e: unknown) => this.d.log(`free model setup after install failed: ${String(e)}`));
+    }
+    return this.state();
   }
 
   private async health(timeoutMs = 3000): Promise<boolean> {
@@ -495,6 +535,7 @@ export class OmniRouteService {
     if (!this.installedVersion()) throw new Error("OmniRoute is not installed");
     if (!this.nodeBin) this.set({ node: this.detectNode() });
     if (!this.nodeBin) throw new Error(this.view.node.detail);
+    if (this.d.follower?.() && (await this.adopt())) return this.state();
     this.set({ phase: "starting", busy: "Starting the gateway", error: null });
     try {
       // A server left over from a crash holds our data dir; the CLI stops it by its pid file.
@@ -608,16 +649,30 @@ export class OmniRouteService {
       managed: "omniroute",
     };
     const cur = s.providers.find((p) => p.id === OMNIROUTE_PROVIDER_ID);
-    if (cur && cur.baseUrl === provider.baseUrl && cur.hasKey && cur.managed === "omniroute") return;
-    this.d.updateSettings({
-      providers: [...s.providers.filter((p) => p.id !== OMNIROUTE_PROVIDER_ID), provider],
-    });
+    const patch: Partial<Settings> = {};
+    if (!(cur && cur.baseUrl === provider.baseUrl && cur.hasKey && cur.managed === "omniroute")) {
+      patch.providers = [...s.providers.filter((p) => p.id !== OMNIROUTE_PROVIDER_ID), provider];
+    }
+    // Chains set up before the "OmniRoute" model existed live only in the gateway state.
+    const chain = s.omniroute.chain.length
+      ? s.omniroute.chain
+      : this.view.models
+          .filter((m) => m.chainIndex !== null && s.models.some((x) => x.id === memberId(m.id)))
+          .sort((a, b) => a.chainIndex! - b.chainIndex!)
+          .map((m) => memberId(m.id));
+    if (chain.join("|") !== s.omniroute.chain.join("|")) patch.omniroute = { ...s.omniroute, chain };
+    const auto = autoModel(s, chain);
+    const curAuto = s.models.find((m) => m.id === OMNIROUTE_AUTO_MODEL_ID);
+    if (!curAuto || JSON.stringify(curAuto) !== JSON.stringify(auto)) patch.models = [...s.models.filter((m) => m.id !== OMNIROUTE_AUTO_MODEL_ID), auto];
+    if (Object.keys(patch).length) this.d.updateSettings(patch);
   }
 
   async stop(): Promise<OmniRouteView> {
     this.stopping = true;
     const child = this.child;
-    if (this.nodeBin && this.installedVersion()) await this.cli(["stop"], { json: false, timeoutMs: 20_000 }).catch(() => undefined);
+    // A gateway adopted from another copy of the IDE keeps serving it; this copy only lets go of it.
+    const adopted = !child && !!this.d.follower?.() && this.view.phase === "running";
+    if (!adopted && this.nodeBin && this.installedVersion()) await this.cli(["stop"], { json: false, timeoutMs: 20_000 }).catch(() => undefined);
     if (child && child.exitCode === null) {
       child.kill();
       await Promise.race([new Promise((r) => child.once("exit", r)), sleep(5000)]);
@@ -827,7 +882,7 @@ export class OmniRouteService {
   }
 
   /** Does the model take a prompt of `chars` and still see both its first and last line? */
-  private async holds(id: string, chars: number, systemAsUser: boolean): Promise<{ ok: true } | { ok: false; maxChars: number | null; sizeLimit: boolean }> {
+  private async holds(id: string, chars: number, systemAsUser: boolean): Promise<Holds> {
     const first = testWord();
     const last = testWord();
     const messages = [
@@ -837,31 +892,44 @@ export class OmniRouteService {
     const r = await this.ask(id, systemAsUser ? foldSystemPrompt(messages) : messages);
     if (r.error) {
       const max = MAX_CHARS_RE.exec(r.error);
-      return { ok: false, maxChars: max ? Number(max[1]) : null, sizeLimit: !!max || INPUT_LIMIT_RE.test(r.error) };
+      return { ok: false, maxChars: max ? Number(max[1]) : null, sizeLimit: !!max || INPUT_LIMIT_RE.test(r.error), error: r.error };
     }
     // A provider that silently cuts long prompts loses one of the words.
-    return r.text.includes(first) && r.text.includes(last) ? { ok: true } : { ok: false, maxChars: null, sizeLimit: true };
+    return r.text.includes(first) && r.text.includes(last) ? { ok: true } : { ok: false, maxChars: null, sizeLimit: true, error: "lost part of the prompt" };
+  }
+
+  /** `holds`, retried once when the failure does not name the size. Gateways often relay an input limit as a bare 502,
+   * so a long prompt that fails twice while a short one still works right after counts as a size refusal. A rate limit
+   * or timeout never does: that is the provider being busy. */
+  private async holdsSized(id: string, chars: number, systemAsUser: boolean): Promise<Holds> {
+    const r = await this.holds(id, chars, systemAsUser);
+    if (r.ok || r.sizeLimit) return r;
+    const again = await this.holds(id, chars, systemAsUser);
+    if (again.ok || again.sizeLimit || BUSY_RE.test(again.error)) return again;
+    const control = await this.holds(id, Math.min(1000, Math.floor(chars / 4)), systemAsUser);
+    if (!control.ok) return again;
+    this.d.log(`${id} fails a ${chars}-character prompt twice but takes a short one; counting it as an input limit (${again.error})`);
+    return { ...again, sizeLimit: true };
   }
 
   /** Real input limit in characters, or null when the model takes the full test prompt (its advertised window then
-   * stands) or the measurement was interrupted by something other than size. */
+   * stands). */
   private async measureInput(m: GatewayModel, systemAsUser: boolean): Promise<number | null> {
     const s = this.d.settings().omniroute;
     let hi = Math.min(s.windowProbeChars, m.context_length ? Math.floor(m.context_length * CHARS_PER_TOKEN * 0.8) : Infinity);
-    let r = await this.holds(m.id, hi, systemAsUser);
+    let r = await this.holdsSized(m.id, hi, systemAsUser);
     if (r.ok) return null;
     let lo = 0;
     for (;;) {
       if (r.maxChars) return Math.floor(r.maxChars * 0.9);
-      if (!r.sizeLimit) return lo || null;
       if (lo) return lo;
       const next = Math.floor(hi / 2);
       if (next < s.minAgentInputChars / 2) return next;
-      r = await this.holds(m.id, next, systemAsUser);
+      r = await this.holdsSized(m.id, next, systemAsUser);
       if (r.ok) {
         lo = next;
         const mid = Math.floor((lo + hi) / 2);
-        r = await this.holds(m.id, mid, systemAsUser);
+        r = await this.holdsSized(m.id, mid, systemAsUser);
         if (r.ok) return mid;
       } else hi = next;
     }
@@ -929,7 +997,8 @@ export class OmniRouteService {
   /** Makes the given models (or the best working ones) the agent's failover chain. The IDE switches between them
    * itself, sending each the prompt in the shape it understands and resuming cut-off replies. The gateway combo is
    * kept for other apps, with only the models that honour a system prompt. */
-  async setup(ids: string[]): Promise<OmniRouteView> {
+  /** Tests free models and saves the chain behind the "OmniRoute" model. `selectAgent` also makes it the agent's model. */
+  async setup(ids: string[], selectAgent = true): Promise<OmniRouteView> {
     this.requireRunning();
     let chosen: OmniRouteModelView[];
     if (ids.length) {
@@ -972,7 +1041,7 @@ export class OmniRouteService {
       }).catch(() => undefined);
       const native = chosen.filter((m) => !m.systemAsUser);
       if (native.length) await this.cli(["combo", "create", combo, "--strategy", "priority", "--models", native.map((m) => m.id).join(",")], { json: false });
-      this.applyToSettings(chosen);
+      this.applyToSettings(chosen, selectAgent);
       const order = new Map(chosen.map((m, i) => [m.id, i]));
       const known = new Map(this.view.models.map((m) => [m.id, m]));
       for (const m of chosen) if (!known.has(m.id)) known.set(m.id, m);
@@ -993,7 +1062,7 @@ export class OmniRouteService {
     }
   }
 
-  private applyToSettings(chosen: OmniRouteModelView[]): void {
+  private applyToSettings(chosen: OmniRouteModelView[], selectAgent: boolean): void {
     const s = this.d.settings();
     const pid = OMNIROUTE_PROVIDER_ID;
     const members: ModelConfig[] = chosen.map((m) => {
@@ -1006,7 +1075,7 @@ export class OmniRouteService {
         ctx = Math.min(ctx, input + max);
       }
       return {
-        id: `${pid}:${m.id}`,
+        id: memberId(m.id),
         providerId: pid,
         name: m.id,
         label: `${m.name} (free)`,
@@ -1017,15 +1086,42 @@ export class OmniRouteService {
         ...(m.systemAsUser ? { systemAsUser: true } : {}),
       };
     });
-    const previous = [s.roles.agent, ...s.roles.agentFallbacks].filter((id) => !id.startsWith(`${pid}:`));
-    const [first, ...rest] = members.map((m) => m.id);
+    const chain = members.map((m) => m.id);
+    const models = [...s.models.filter((m) => m.providerId !== pid), ...members];
+    const isMember = (id: string) => id.startsWith(`${pid}:`);
+    // The user's own models stay behind the free chain as the last resort.
+    const previous = [s.roles.agent, ...s.roles.agentFallbacks].filter((id) => !isMember(id));
+    const keep = (id: string) => !isMember(id) || id === OMNIROUTE_AUTO_MODEL_ID || chain.includes(id);
+    const roles = selectAgent
+      ? { ...s.roles, agent: OMNIROUTE_AUTO_MODEL_ID, agentFallbacks: [...new Set(previous)] }
+      : {
+          ...s.roles,
+          agent: keep(s.roles.agent) ? s.roles.agent : OMNIROUTE_AUTO_MODEL_ID,
+          agentFallbacks: s.roles.agentFallbacks.filter(keep),
+        };
     this.d.updateSettings({
-      models: [...s.models.filter((m) => m.providerId !== pid), ...members],
-      roles: {
-        ...s.roles,
-        agent: first!,
-        agentFallbacks: [...new Set([...rest, ...previous])].filter((id) => id !== first),
-      },
+      models: [...models, autoModel(s, chain, members)],
+      omniroute: { ...s.omniroute, chain },
+      roles: { ...roles, summarizer: keep(roles.summarizer) ? roles.summarizer : "" },
     });
   }
+}
+
+function memberId(gatewayModelId: string): string {
+  return `${OMNIROUTE_PROVIDER_ID}:${gatewayModelId}`;
+}
+
+/** The "OmniRoute" model the pickers list. Its limits are the first chain model's; the router expands it into the chain. */
+function autoModel(s: Settings, chain: string[], members: ModelConfig[] = s.models): ModelConfig {
+  const first = members.find((m) => m.id === chain[0]);
+  return {
+    id: OMNIROUTE_AUTO_MODEL_ID,
+    providerId: OMNIROUTE_PROVIDER_ID,
+    name: s.omniroute.comboName,
+    label: "OmniRoute (free, switches automatically)",
+    kind: "chat",
+    contextLength: first?.contextLength ?? s.local.localContextCap,
+    maxOutputTokens: first?.maxOutputTokens ?? s.local.localMaxOutputTokens,
+    dim: null,
+  };
 }

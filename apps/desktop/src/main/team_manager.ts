@@ -168,8 +168,10 @@ export class TeamManager {
   }
 
   /** Called at startup; brings the hub back if it was on. */
-  async boot(): Promise<void> {
-    if (this.data.host.enabled) await this.startHosting();
+  /** `host: false` in every copy of the IDE but the first: the first one already serves the team hub on its ports. */
+  async boot(opts: { host?: boolean } = {}): Promise<void> {
+    if (this.data.host.enabled && opts.host !== false) await this.startHosting();
+    else if (this.data.host.enabled) this.hostError = "hosted by the first RLM IDE window on this computer";
     for (const c of this.data.connections) void this.runtime(c.id).catch(() => undefined);
   }
 

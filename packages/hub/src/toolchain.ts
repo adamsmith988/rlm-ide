@@ -1,10 +1,36 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { HubOption, HubPythonEnv, HubPythonView, HubToolsView } from "@rlm/contracts";
+import { copyTree, download, driverCudaVersion, extract, findDirWith, listReleases, moveTree, pickLlamaAssets, type LlamaFlavor, type LlamaPick, type LlamaWant } from "./llama_release";
 import { lastLines, run } from "./proc";
 
 const exe = (name: string) => (process.platform === "win32" ? `${name}.exe` : name);
-const LLAMA_REPO = "https://github.com/ggml-org/llama.cpp";
+const RELEASE_FILE = "rlm-release.json";
+const cudartName = (version: string) => `cudart64_${version.split(".")[0]}.dll`;
+
+/** Prebuilt Linux and macOS binaries load their ggml libraries from their own folder. Windows finds DLLs next to
+ * the executable without help. */
+function libraryEnv(binDir: string): Record<string, string> {
+  if (process.platform === "linux") return { LD_LIBRARY_PATH: [binDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":") };
+  if (process.platform === "darwin") return { DYLD_LIBRARY_PATH: [binDir, process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(":") };
+  return {};
+}
+
+function readRelease(binDir: string): { flavor: LlamaFlavor; tag: string } | null {
+  try {
+    return JSON.parse(readFileSync(path.join(binDir, RELEASE_FILE), "utf8")) as { flavor: LlamaFlavor; tag: string };
+  } catch {
+    return null;
+  }
+}
+
+/** Linux systems with the CUDA toolkit already have the runtime; Windows builds always get their own copy. */
+async function hasCudaRuntime(version: string): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  const major = version.split(".")[0];
+  const r = await run("ldconfig", ["-p"], { keepChars: 2_000_000 });
+  return r.code === 0 && r.tail.includes(`libcudart.so.${major}`) && r.tail.includes(`libcublas.so.${major}`);
+}
 
 export interface PythonProbe {
   python: string;
@@ -23,8 +49,12 @@ export interface LlamaCpp {
   quantize: string | null;
   imatrix: string | null;
   convert: string | null;
-  backend: "cpu" | "cuda" | null;
+  backend: LlamaFlavor | null;
+  /** Environment the binaries need: prebuilt Linux and macOS builds load their libraries from their own folder. */
+  env: Record<string, string>;
   version: string | null;
+  /** Why the installed llama-server does not run (a missing system library, for example). */
+  error: string | null;
   quantTypes: HubOption[];
   convertArchitectures: string[];
   convertOutTypes: string[];
@@ -71,6 +101,8 @@ export class Toolchain {
       basePythons: () => string[];
       configuredPython: () => string;
       configuredLlamaCpp: () => string;
+      /** GitHub repository of llama.cpp, and a release tag ("" = the newest build with an archive for this system). */
+      llamaRelease: () => { repo: string; release: string };
       onChange: () => void;
     },
   ) {
@@ -216,29 +248,42 @@ export class Toolchain {
     return null;
   }
 
+  /** Downloaded builds: binaries in bin/, converter scripts beside them. */
   get ownLlamaDir(): string {
     return path.join(this.o.dir, "llama.cpp");
   }
 
+  /** Builds from source (clone and CMake). Older IDE versions built straight in ownLlamaDir, which is still searched. */
+  private get sourceDir(): string {
+    return path.join(this.ownLlamaDir, "source");
+  }
+
   async llamaCpp(force = false): Promise<LlamaCpp> {
     if (this.llamaCache && !force) return this.llamaCache;
-    const dirs = [this.o.configuredLlamaCpp(), this.ownLlamaDir].filter(Boolean);
+    const dirs = [this.o.configuredLlamaCpp(), this.ownLlamaDir, this.sourceDir].filter(Boolean);
     const server = this.findLlamaBin("llama-server", dirs);
     const quantize = this.findLlamaBin("llama-quantize", dirs);
     const imatrix = this.findLlamaBin("llama-imatrix", dirs);
-    const dir = dirs.find((d) => existsSync(d)) ?? null;
     const convert = dirs.map((d) => path.join(d, "convert_hf_to_gguf.py")).find((p) => existsSync(p)) ?? null;
+    const dir = convert ? path.dirname(convert) : (dirs.find((d) => existsSync(d)) ?? null);
     let version: string | null = null;
     let backend: LlamaCpp["backend"] = null;
+    let env: Record<string, string> = {};
+    let error: string | null = null;
     if (server) {
-      const r = await run(server, ["--version"]);
-      version = /version:\s*(\S+.*)/.exec(r.tail)?.[1]?.trim() ?? lastLines(r.tail, 1);
       const binDir = path.dirname(server);
+      env = libraryEnv(binDir);
+      const r = await run(server, ["--version"], { env });
+      if (r.code === 0) version = /version:\s*(\S+.*)/.exec(r.tail)?.[1]?.trim() ?? lastLines(r.tail, 1);
+      else error = `llama-server does not start: ${lastLines(r.tail, 3)}`;
       const libs = existsSync(binDir) ? readdirSync(binDir).join(" ") : "";
-      backend = /cuda/i.test(libs) || /CUDA/.test(r.tail) ? "cuda" : "cpu";
+      const release = readRelease(binDir);
+      backend =
+        release?.flavor ??
+        (/ggml-cuda|cudart/i.test(libs) || /CUDA/.test(r.tail) ? "cuda" : /ggml-vulkan/i.test(libs) || /Vulkan/.test(r.tail) ? "vulkan" : process.platform === "darwin" ? "metal" : "cpu");
     }
     let quantTypes: HubOption[] = [];
-    if (quantize) quantTypes = parseQuantTypes((await run(quantize, ["--help"], { keepChars: 1_000_000 })).tail);
+    if (quantize) quantTypes = parseQuantTypes((await run(quantize, ["--help"], { keepChars: 1_000_000, env })).tail);
     let convertArchitectures: string[] = [];
     let convertOutTypes: string[] = [];
     if (convert) {
@@ -250,18 +295,78 @@ export class Toolchain {
       convertArchitectures = parseConvertArchitectures([src, ...modules].join("\n"));
       convertOutTypes = parseConvertOutTypes(src);
     }
-    this.llamaCache = { dir, server, quantize, imatrix, convert, backend, version, quantTypes, convertArchitectures, convertOutTypes };
+    this.llamaCache = { dir, server, quantize, imatrix, convert, backend, env, version, error, quantTypes, convertArchitectures, convertOutTypes };
     this.o.onChange();
     return this.llamaCache;
+  }
+
+  /** Downloads a prebuilt llama.cpp for this system (CUDA when the NVIDIA driver allows, else Vulkan, or CPU) and the
+   * converter scripts of the same build. */
+  async downloadLlamaCpp(want: LlamaWant): Promise<void> {
+    await this.task(`llama.cpp download (${want})`, async (log) => {
+      const cudaMax = want === "cpu" || process.platform === "darwin" ? null : await driverCudaVersion();
+      if (cudaMax) log(`NVIDIA driver supports CUDA ${cudaMax}`);
+      const { repo, release } = this.o.llamaRelease();
+      const releases = await listReleases(repo, release);
+      let pick: LlamaPick | null = null;
+      for (const rel of releases) if ((pick = pickLlamaAssets(rel, { platform: process.platform, arch: process.arch, want, cudaMax }))) break;
+      if (!pick) throw new Error(`no prebuilt llama.cpp for ${process.platform}/${process.arch} in ${repo}${release ? ` ${release}` : "'s recent releases"}. Build it from source instead.`);
+      log(`${pick.tag}: ${pick.main.name} (${pick.flavor})`);
+
+      const work = path.join(this.o.dir, `llama-download-${process.pid}`);
+      rmSync(work, { recursive: true, force: true });
+      try {
+        const main = path.join(work, pick.main.name);
+        await download(pick.main.url, main, log);
+        await extract(main, path.join(work, "main"));
+        const from = findDirWith(path.join(work, "main"), exe("llama-server"));
+        if (!from) throw new Error(`${pick.main.name} holds no llama-server`);
+        const bin = path.join(this.ownLlamaDir, "bin");
+        moveTree(from, bin);
+
+        if (pick.runtime && !(await hasCudaRuntime(pick.cudaVersion!))) {
+          log(`CUDA ${pick.cudaVersion} runtime: ${pick.runtime.name}`);
+          const rt = path.join(work, pick.runtime.name);
+          await download(pick.runtime.url, rt, log);
+          await extract(rt, path.join(work, "runtime"));
+          const lib = findDirWith(path.join(work, "runtime"), process.platform === "win32" ? cudartName(pick.cudaVersion!) : `libcudart.so.${pick.cudaVersion!.split(".")[0]}`);
+          copyTree(lib ?? path.join(work, "runtime"), bin);
+        }
+        writeFileSync(path.join(bin, RELEASE_FILE), JSON.stringify({ repo, tag: pick.tag, flavor: pick.flavor, asset: pick.main.name, runtime: pick.runtime?.name ?? null }, null, 2));
+
+        // The converter is Python in the source tree; it ships in no binary archive.
+        const src = path.join(work, `${pick.tag}.tar.gz`);
+        log("converter scripts");
+        await download(`https://github.com/${repo}/archive/refs/tags/${encodeURIComponent(pick.tag)}.tar.gz`, src, log);
+        await extract(src, path.join(work, "src"));
+        const top = findDirWith(path.join(work, "src"), "convert_hf_to_gguf.py");
+        if (top) {
+          for (const item of ["convert_hf_to_gguf.py", "conversion", "gguf-py", "requirements", "requirements.txt"]) {
+            const p = path.join(top, item);
+            if (!existsSync(p)) continue;
+            moveTree(p, path.join(this.ownLlamaDir, item));
+          }
+        } else log("the source archive has no converter; GGUF files can still be served");
+      } finally {
+        rmSync(work, { recursive: true, force: true, maxRetries: 3 });
+      }
+      log("done");
+    });
+    await this.convertRequirements();
+    const l = await this.llamaCpp(true);
+    if (!l.server) throw new Error("llama.cpp was downloaded but llama-server was not found");
+    if (l.error) throw new Error(l.error);
   }
 
   /** Clones llama.cpp and builds the server, quantizer and imatrix tools; installs the converter's missing Python packages. */
   async installLlamaCpp(backend: "cpu" | "cuda"): Promise<void> {
     await this.task(`llama.cpp (${backend})`, async (log) => {
-      const dir = this.ownLlamaDir;
+      const dir = this.sourceDir;
       if (!existsSync(path.join(dir, "CMakeLists.txt"))) {
-        log(`cloning ${LLAMA_REPO}`);
-        const r = await run("git", ["clone", "--depth", "1", LLAMA_REPO, dir], { onLine: log });
+        const url = `https://github.com/${this.o.llamaRelease().repo}`;
+        log(`cloning ${url}`);
+        rmSync(dir, { recursive: true, force: true });
+        const r = await run("git", ["clone", "--depth", "1", url, dir], { onLine: log });
         if (r.code !== 0) throw new Error(`git clone failed: ${lastLines(r.tail)}`);
       }
       const build = path.join(dir, "build");
@@ -337,6 +442,7 @@ export class Toolchain {
         convert: l?.convert ?? null,
         backend: l?.backend ?? null,
         version: l?.version ?? null,
+        error: l?.error ?? null,
         quantTypes: l?.quantTypes ?? [],
         convertArchitectures: l?.convertArchitectures.length ?? 0,
       },

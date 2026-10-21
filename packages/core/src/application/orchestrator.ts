@@ -110,12 +110,18 @@ export class Orchestrator {
 
   // ---------- chats ----------
 
+  /** Chats of the open project folder only. */
   listChats(): Promise<ChatSummary[]> {
-    return this.d.conversations.listChats();
+    return this.d.conversations.listChats(this.d.workspace.root());
   }
 
   createChat(title: string): Promise<ChatSummary> {
-    return this.d.conversations.createChat(title);
+    return this.d.conversations.createChat(title, this.d.workspace.root());
+  }
+
+  /** Kernels of chats that are not running keep the old project's files and variables; a folder switch ends them. */
+  async workspaceChanged(): Promise<void> {
+    await this.engine.shutdownIdleKernels((chatId) => this.runner.isActive(chatId));
   }
 
   async deleteChat(chatId: string): Promise<void> {
@@ -145,6 +151,11 @@ export class Orchestrator {
 
   async send(args: { chatId: string; text: string; editorContext: EditorContextInput; toolGroups?: string[]; origin?: "user" | "wakeup" }): Promise<{ turnId: string }> {
     if (this.runner.isActive(args.chatId)) throw new Error("A turn is already running in this chat. Stop it first.");
+    const chat = await this.d.conversations.getChat(args.chatId);
+    if (!chat) throw new Error("This chat no longer exists.");
+    const root = this.d.workspace.root();
+    if (chat.workspaceId && chat.workspaceId !== root) throw new Error(`This chat belongs to the project ${chat.workspaceId}. Open that folder to continue it.`);
+    if (!chat.workspaceId && root) await this.d.conversations.setChatWorkspace(chat.id, root);
     const prior = await this.d.conversations.getTurns(args.chatId);
     const turn = await this.d.conversations.appendTurn({
       id: newId("turn"),
@@ -215,14 +226,16 @@ export class Orchestrator {
     if (!b.wakeup) return;
     if (b.wakeup.at > now + 1000) return this.arm(b);
     if (this.runner.isActive(chatId)) return this.arm(b, 15000);
-    const root = this.d.workspace.root();
-    if (!root || (b.wakeup.workspace && root !== b.wakeup.workspace)) {
-      this.d.log.info(`wake-up for chat ${chatId} waits for workspace ${b.wakeup.workspace ?? "(any)"}`);
-      return this.arm(b, root ? 60000 : 10000);
-    }
-    if (!(await this.d.conversations.listChats()).some((c) => c.id === chatId)) {
+    const chat = await this.d.conversations.getChat(chatId);
+    if (!chat) {
       await boards.drop(chatId);
       return;
+    }
+    const root = this.d.workspace.root();
+    const wanted = chat.workspaceId ?? b.wakeup.workspace;
+    if (!root || (wanted && root !== wanted)) {
+      this.d.log.info(`wake-up for chat ${chatId} waits for workspace ${wanted ?? "(any)"}`);
+      return this.arm(b, root ? 60000 : 10000);
     }
     const limit = this.d.settings.get().rlm.maxAutoWakeups;
     if (b.autoWakeups >= limit) {

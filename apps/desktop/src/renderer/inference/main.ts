@@ -38,7 +38,11 @@ window.addEventListener("message", (ev) => {
     powerPreference: cfg.powerPreference,
     onStatus: (s) => window.inferenceHost.status(s),
   });
-  port.onmessage = (m) => gen.handle(m.data as InferenceRequest, (r) => port.postMessage(r));
+  port.onmessage = (m) =>
+    gen.handle(m.data as InferenceRequest, (r) => {
+      if (r.type === "error" && r.id === "*") window.inferenceHost.status(`failed: ${r.message}`);
+      port.postMessage(r);
+    });
   gen
     .load()
     .then(() => port.postMessage({ type: "ready" }))

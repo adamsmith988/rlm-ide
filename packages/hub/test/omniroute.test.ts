@@ -3,7 +3,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { defaultSettings, type OmniRouteView, type Settings } from "@rlm/contracts";
+import { agentPickerModels, BUILTIN, defaultSettings, OMNIROUTE_AUTO_MODEL_ID, type OmniRouteView, type Settings } from "@rlm/contracts";
 import { OmniRouteService, capabilityTier, freeChatCandidates, interleaveByProvider, parseCliJson, satisfiesEngines, type GatewayModel } from "../src";
 
 describe("omniroute helpers", () => {
@@ -110,6 +110,7 @@ const MODELS = [
   { id: "kl/broken", owned_by: "keyless", context_length: 200000, capabilities: { tool_calling: true } },
   { id: "kl/chatty", owned_by: "keyless", context_length: 32000 },
   { id: "kl/tiny", owned_by: "keyless", context_length: 400000 },
+  { id: "kl/mute", owned_by: "keyless", context_length: 128000 },
   { id: "fr/big", owned_by: "freekey", context_length: 128000, capabilities: { tool_calling: true } },
   { id: "paid/x", owned_by: "paid", context_length: 400000 },
 ];
@@ -132,6 +133,8 @@ if (cmd === "serve") {
       const chars = messages.reduce((n, m) => n + m.content.length, 0);
       if (model === "fr/big" && chars > 20000) return send(502, { error: { message: "[502]: Prompt too long (max 20000 characters)." } });
       if (model === "kl/tiny" && chars > 6000) return send(429, { error: { message: "[429]: DuckDuckGo AI Chat error: ERR_INPUT_LIMIT" } });
+      // The same limit relayed as a bare 502 that does not say why.
+      if (model === "kl/mute" && chars > 6000) return send(502, { error: { message: "[502]: upstream error" } });
       // fr/big's provider drops the system role, like the web-playground providers do.
       const all = (model === "fr/big" ? messages.filter((m) => m.role !== "system") : messages).map((m) => m.content).join("\n");
       const words = [/secret word is (\S+)\./, /first test word is (\S+)\./, /last test word is (\S+)\./].map((re) => all.match(re)?.[1]).filter(Boolean);
@@ -243,6 +246,9 @@ describe("OmniRouteService against a fake gateway", () => {
       hasKey: true,
       baseUrl: `http://127.0.0.1:${settings.omniroute.port}/v1`,
     });
+    // Once the gateway runs, the pickers list "OmniRoute"; the agent keeps its model until the user picks it.
+    expect(settings.models.find((m) => m.id === OMNIROUTE_AUTO_MODEL_ID)).toMatchObject({ providerId: "omniroute", kind: "chat", label: expect.stringMatching(/^OmniRoute/) });
+    expect(settings.roles.agent).toBe("builtin:agent");
 
     await svc.refreshCatalog();
     expect(svc.state().providers.map((p) => [p.id, p.keyless, p.connected])).toEqual([
@@ -270,11 +276,16 @@ describe("OmniRouteService against a fake gateway", () => {
     // A hidden input limit is measured; one too small for the agent's instructions keeps the model out of the chain.
     expect(byId.get("fr/big")).toMatchObject({ ok: true, systemAsUser: true, inputLimitChars: 18000 });
     expect(byId.get("kl/tiny")).toMatchObject({ ok: false, inputLimitChars: 5000, error: expect.stringMatching(/accepts only about 5000 characters/) });
+    // A model that answers short prompts but fails long ones without naming the size is measured all the same.
+    expect(byId.get("kl/mute")).toMatchObject({ ok: false, inputLimitChars: 5000, error: expect.stringMatching(/accepts only about 5000 characters/) });
 
-    // The agent is the first chain model and the rest are its backups; the model whose provider drops system
-    // prompts gets the agent's instructions and memory inside the user message.
-    expect(settings.roles.agent).toBe("omniroute:kl/fast");
-    expect(settings.roles.agentFallbacks).toEqual(["omniroute:fr/big", "builtin:agent"]);
+    // The agent's model is "OmniRoute", which stands for the chain; the model whose provider drops system prompts gets
+    // the agent's instructions and memory inside the user message. The previous model is the last resort.
+    expect(settings.roles.agent).toBe(OMNIROUTE_AUTO_MODEL_ID);
+    expect(settings.omniroute.chain).toEqual(["omniroute:kl/fast", "omniroute:fr/big"]);
+    expect(settings.roles.agentFallbacks).toEqual(["builtin:agent"]);
+    expect(agentPickerModels(settings).map((m) => m.id)).toEqual([BUILTIN.agentModelId, OMNIROUTE_AUTO_MODEL_ID]);
+    expect(settings.models.find((m) => m.id === OMNIROUTE_AUTO_MODEL_ID)).toMatchObject({ contextLength: 64000, maxOutputTokens: 8000 });
     const models = new Map(settings.models.filter((m) => m.providerId === "omniroute").map((m) => [m.id, m]));
     expect(models.get("omniroute:kl/fast")).toMatchObject({
       contextLength: 64000,
@@ -298,11 +309,18 @@ describe("OmniRouteService against a fake gateway", () => {
 
     // A manual order replaces the chain; the previous non-gateway agent stays as the last resort.
     await svc.setup(["fr/big", "kl/chatty"]);
-    expect(settings.roles.agent).toBe("omniroute:fr/big");
+    expect(settings.roles.agent).toBe(OMNIROUTE_AUTO_MODEL_ID);
+    expect(settings.omniroute.chain).toEqual(["omniroute:fr/big"]);
     expect(settings.roles.agentFallbacks).toEqual(["builtin:agent"]);
-    expect(settings.models.filter((m) => m.providerId === "omniroute").map((m) => m.id)).toEqual(["omniroute:fr/big"]);
+    expect(settings.models.filter((m) => m.providerId === "omniroute").map((m) => m.id)).toEqual(["omniroute:fr/big", OMNIROUTE_AUTO_MODEL_ID]);
     fake = JSON.parse(readFileSync(path.join(dir, "data", "fake.json"), "utf8"));
     expect(fake.combos["rlm-free"]).toBeUndefined();
+
+    // The background setup after install refreshes the chain without taking the agent from the user's model.
+    settings = { ...settings, roles: { ...settings.roles, agent: "builtin:agent", agentFallbacks: [] } };
+    await svc.setup(["kl/fast"], false);
+    expect(settings.roles.agent).toBe("builtin:agent");
+    expect(settings.omniroute.chain).toEqual(["omniroute:kl/fast"]);
 
     // Restart reuses the stored key.
     await svc.stop();

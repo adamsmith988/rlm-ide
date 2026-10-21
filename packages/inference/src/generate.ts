@@ -3,12 +3,44 @@
 import {
   AutoModelForCausalLM,
   AutoTokenizer,
+  DynamicCache,
   InterruptableStoppingCriteria,
   TextStreamer,
+  Tensor,
   env,
   type PreTrainedModel,
   type PreTrainedTokenizer,
 } from "@huggingface/transformers";
+
+/** Inside Electron the allocator ends the process on any single allocation of 1 GiB or more (plain Node does not).
+ * onnxruntime's CPU arena grows in doubling regions and soon asks for one that large (see cpuSessionOptions), and the
+ * attention scores of a pass are one float per head and (new token, total token) pair: 16 heads crashed reading a
+ * 4144-token prompt at once and not 4040. Long prompts are read in chunks that keep that tensor at 256 MB. */
+const BYTES_PER_PAIR_AND_HEAD = 4;
+const PREFILL_BUFFER_BYTES = 2 ** 28;
+
+/** Prompt tokens per forward pass when `totalTokens` will be in context. */
+export function prefillChunk(totalTokens: number, heads: number): number {
+  return Math.max(64, Math.floor(PREFILL_BUFFER_BYTES / (BYTES_PER_PAIR_AND_HEAD * Math.max(1, heads) * Math.max(1, totalTokens))));
+}
+
+/** onnxruntime session options for the CPU inside Electron: no memory arena, so every tensor is its own allocation of
+ * its own size (the arena's doubling regions crash Electron's allocator well before memory runs out). */
+export function cpuSessionOptions(threads: number): Record<string, unknown> {
+  return { enableCpuMemArena: false, ...(threads > 0 ? { intraOpNumThreads: threads } : {}) };
+}
+
+/** present.* outputs of a forward pass under the names the next pass reads them from (as Transformers.js does). */
+function cacheFrom(outputs: Record<string, Tensor>, into: DynamicCache | null): DynamicCache {
+  const next: Record<string, Tensor> = {};
+  for (const [name, t] of Object.entries(outputs)) {
+    if (!name.startsWith("present")) continue;
+    next[name.replace("present_ssm", "past_ssm").replace("present_conv", "past_conv").replace("present_recurrent", "past_recurrent").replace("present", "past_key_values")] = t;
+  }
+  if (!into) return new DynamicCache(next);
+  into.update(next);
+  return into;
+}
 
 export type InferenceRequest =
   | { type: "generate"; id: string; messages: Array<{ role: string; content: string }>; maxTokens: number; temperature: number; enableThinking: boolean; contextLimit: number }
@@ -27,6 +59,8 @@ export interface LoadOptions {
   wasmPaths?: string;
   /** WebGPU adapter choice; must match the adapter that passed the shader-f16 probe. */
   powerPreference?: "high-performance" | "low-power";
+  /** onnxruntime threads on the CPU (unset: its default, one per logical CPU). */
+  cpuThreads?: number;
   onStatus?: (s: string) => void;
 }
 
@@ -88,11 +122,13 @@ export class LocalGenerator {
         if (this.opts.powerPreference && webgpu) webgpu.powerPreference = this.opts.powerPreference;
         this.opts.onStatus?.("loading tokenizer");
         this.tokenizer = await AutoTokenizer.from_pretrained(this.opts.modelDir);
-        this.opts.onStatus?.(`loading model on ${this.opts.device}`);
+        const threads = this.opts.device === "cpu" && this.opts.cpuThreads ? this.opts.cpuThreads : 0;
+        this.opts.onStatus?.(`loading model on ${this.opts.device}${threads ? ` (${threads} threads)` : ""}`);
         this.model = await AutoModelForCausalLM.from_pretrained(this.opts.modelDir, {
           dtype: "q4f16",
           device: this.opts.device,
           use_external_data_format: 2,
+          ...(this.opts.device === "cpu" ? { session_options: cpuSessionOptions(threads) } : {}),
         } as Parameters<typeof AutoModelForCausalLM.from_pretrained>[1]);
         this.opts.onStatus?.("ready");
       })();
@@ -137,6 +173,7 @@ export class LocalGenerator {
     const maxNew = Math.max(16, Math.min(req.maxTokens, req.contextLimit - inputTokens - 8));
     const splitter = new Splitter(req.enableThinking);
     let outputTokens = 0;
+    let firstAt = 0;
     const streamer = new TextStreamer(tok, {
       skip_prompt: true,
       skip_special_tokens: true,
@@ -144,19 +181,44 @@ export class LocalGenerator {
         for (const p of splitter.push(text)) send({ type: "chunk", id: req.id, kind: p.kind, text: p.text });
       },
       token_callback_function: () => {
-        outputTokens++;
+        if (!outputTokens++) firstAt = performance.now();
       },
     } as never);
-    await model.generate({
-      ...(inputs as object),
-      max_new_tokens: maxNew,
-      do_sample: req.temperature > 0,
-      temperature: Math.max(0.01, req.temperature),
-      top_p: 0.95,
-      streamer,
-      stopping_criteria: stop,
-    } as never);
+    const heads = Number((model.config as unknown as { num_attention_heads?: number }).num_attention_heads ?? 32);
+    const chunk = prefillChunk(inputTokens, heads);
+    let cache: DynamicCache | null = null;
+    const ids = inputs.input_ids as unknown as Tensor;
+    if (this.opts.device === "cpu" && inputTokens > chunk) {
+      // The last token is left for generate(), which is given only that token: for this model it does not skip the
+      // tokens a cache already holds and would read the whole prompt again in one pass.
+      for (let start = 0; start < inputTokens - 1 && !stop.interrupted; start += chunk) {
+        const end = Math.min(start + chunk, inputTokens - 1);
+        const out = (await model.forward({
+          input_ids: ids.slice(null, [start, end]),
+          attention_mask: new Tensor("int64", new BigInt64Array(end).fill(1n), [1, end]),
+          past_key_values: cache,
+        })) as Record<string, Tensor>;
+        cache = cacheFrom(out, cache);
+        this.opts.onStatus?.(`reading the prompt: ${end} of ${inputTokens} tokens`);
+      }
+    }
+    try {
+      await model.generate({
+        ...(inputs as object),
+        ...(cache ? { past_key_values: cache, input_ids: ids.slice(null, [inputTokens - 1, inputTokens]) } : {}),
+        max_new_tokens: maxNew,
+        do_sample: req.temperature > 0,
+        temperature: Math.max(0.01, req.temperature),
+        top_p: 0.95,
+        streamer,
+        stopping_criteria: stop,
+      } as never);
+    } finally {
+      await cache?.dispose();
+    }
     for (const p of splitter.flush()) send({ type: "chunk", id: req.id, kind: p.kind, text: p.text });
+    const secs = (performance.now() - firstAt) / 1000;
+    if (outputTokens > 8 && secs > 0) this.opts.onStatus?.(`ready · ${((outputTokens - 1) / secs).toFixed(1)} tok/s on ${this.opts.device}`);
     if (stop.interrupted) {
       send({ type: "error", id: req.id, message: "generation stopped" });
       return;

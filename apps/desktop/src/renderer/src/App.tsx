@@ -61,7 +61,8 @@ export function App() {
       if (!mod) return;
       const a = useApp.getState();
       const k = e.key.toLowerCase();
-      if (k === "p" && e.shiftKey) a.set({ palette: "commands" });
+      if (k === "o" && !e.shiftKey) void a.pickFolder();
+      else if (k === "p" && e.shiftKey) a.set({ palette: "commands" });
       else if (k === "p") a.set({ palette: "files" });
       else if (k === "s" && a.activeTab) void a.saveTab(a.activeTab);
       else if (k === "b") a.set({ sidebar: !a.sidebar });

@@ -83,8 +83,12 @@ export interface ModelRouterPort {
 // ---------- persistence ----------
 
 export interface ConversationRepo {
-  createChat(title: string): Promise<ChatSummary>;
-  listChats(): Promise<ChatSummary[]>;
+  createChat(title: string, workspaceId: string | null): Promise<ChatSummary>;
+  /** Chats of one project folder (`null`: chats started with no folder open); all chats when omitted. */
+  listChats(workspaceId?: string | null): Promise<ChatSummary[]>;
+  getChat(chatId: string): Promise<ChatSummary | null>;
+  /** Binds a chat started before any folder was open to the folder it first works in. */
+  setChatWorkspace(chatId: string, workspaceId: string): Promise<void>;
   renameChat(chatId: string, title: string): Promise<void>;
   deleteChat(chatId: string): Promise<void>;
   getTurns(chatId: string): Promise<StoredTurn[]>;
@@ -120,6 +124,8 @@ export interface MemoryFilter {
   memory_type?: "short_term" | "long_term";
   session_id?: string | null;
   workspace_id?: string | null;
+  /** With `workspace_id`: also match rows with no workspace (facts about the user, kept for every project). */
+  include_global?: boolean;
   kind?: "chunk" | "fact";
 }
 
@@ -178,7 +184,8 @@ export interface PendingEditRecord {
 
 export interface EditJournal {
   record(e: Omit<PendingEditRecord, "state">): Promise<void>;
-  list(): Promise<PendingEditRecord[]>;
+  /** Applied edits made by chats of one project folder; all of them when omitted. */
+  list(workspaceId?: string): Promise<PendingEditRecord[]>;
   setState(editId: string, state: PendingEditRecord["state"]): Promise<void>;
   get(editId: string): Promise<PendingEditRecord | null>;
 }

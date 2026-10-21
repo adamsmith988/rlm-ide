@@ -1,10 +1,10 @@
 import { api } from "../api";
 import { useApp } from "../store";
-import { IAgent, IClose, IGlobe, IMax, IMin, IPanel, ISearch, ISidebar } from "../ui/icons";
+import { IAgent, IClose, IExternal, IFolder, IGlobe, IMax, IMin, IPanel, ISearch, ISidebar } from "../ui/icons";
 import { LogoMark } from "../ui/LineArt";
 
 export function TitleBar() {
-  const { workspace, sidebar, bottom, agent, browser, set } = useApp();
+  const { workspace, sidebar, bottom, agent, browser, set, pickFolder, newWindow } = useApp();
   return (
     <header className="drag flex shrink-0 items-center gap-2 border-b border-line bg-bg px-3" style={{ height: "var(--titlebar-h)" }}>
       <div className="flex items-center gap-2">
@@ -25,6 +25,12 @@ export function TitleBar() {
         )}
       </div>
       <div className="nodrag flex items-center gap-0.5">
+        <button className="iconbtn" title="Open folder (Ctrl+O)" data-testid="open-folder" onClick={() => void pickFolder()}>
+          <IFolder size={15} />
+        </button>
+        <button className="iconbtn" title="New window" data-testid="new-window" onClick={() => void newWindow()}>
+          <IExternal size={14} />
+        </button>
         {workspace && (
           <>
             <button className="iconbtn" title="Toggle sidebar (Ctrl+B)" style={{ color: sidebar ? "var(--text)" : undefined }} onClick={() => set({ sidebar: !sidebar })}>

@@ -27,7 +27,8 @@ export interface RecallResult {
 }
 
 type FactOp =
-  | { op: "add"; text: string; category?: string }
+  /** `about`: "user" facts follow the user into every project; "project" facts stay in the folder they were learned in. */
+  | { op: "add"; text: string; category?: string; about: "user" | "project" }
   | { op: "update"; id: string; text: string }
   | { op: "delete"; id: string };
 
@@ -52,9 +53,10 @@ export class MemoryService {
     },
   ) {}
 
-  private longTermFilter(scope: MemoryScope, s: MemorySettings): MemoryFilter {
+  /** Facts about the user, plus (per project) the facts of the open project; "user" scope shares every fact. */
+  longTermFilter(scope: MemoryScope, s: MemorySettings): MemoryFilter {
     const f: MemoryFilter = { user_id: scope.userId, memory_type: "long_term" };
-    if (s.longTermScope === "workspace") f.workspace_id = scope.workspaceId;
+    if (s.longTermScope === "workspace") Object.assign(f, { workspace_id: scope.workspaceId, include_global: true });
     return f;
   }
 
@@ -78,18 +80,23 @@ export class MemoryService {
       const { emb, vec } = hit;
       const [short, long, allFacts] = await Promise.all([
         s.sessionLimit > 0
-          ? this.deps.store.search(emb.modelKey, vec, { user_id: scope.userId, memory_type: "short_term", session_id: scope.sessionId }, s.sessionLimit)
+          ? this.deps.store.search(emb.modelKey, vec, { user_id: scope.userId, memory_type: "short_term", session_id: scope.sessionId, workspace_id: scope.workspaceId }, s.sessionLimit)
           : [],
         s.userLimit > 0 ? this.deps.store.search(emb.modelKey, vec, this.longTermFilter(scope, s), s.userLimit) : [],
         s.alwaysRecallFacts > 0 ? this.deps.store.list(this.longTermFilter(scope, s)) : [],
       ]);
       const standing = allFacts.length <= s.alwaysRecallFacts ? allFacts : [];
       const scored = new Map(long.map((p) => [p.id, p.score]));
+      const view = (p: MemoryPoint, score: number): RecalledMemory => ({
+        id: p.id,
+        text: p.payload.text,
+        memoryType: p.payload.memory_type,
+        score,
+        ...(p.payload.memory_type === "long_term" ? { about: p.payload.workspace_id && p.payload.workspace_id === scope.workspaceId ? ("project" as const) : ("user" as const) } : {}),
+      });
       const items: RecalledMemory[] = [
-        ...standing.map((p) => ({ id: p.id, text: p.payload.text, memoryType: p.payload.memory_type, score: scored.get(p.id) ?? 1 })),
-        ...[...long, ...short]
-          .filter((p) => p.score >= s.minScore && !standing.some((f) => f.id === p.id))
-          .map((p) => ({ id: p.id, text: p.payload.text, memoryType: p.payload.memory_type, score: p.score })),
+        ...standing.map((p) => view(p, scored.get(p.id) ?? 1)),
+        ...[...long, ...short].filter((p) => p.score >= s.minScore && !standing.some((f) => f.id === p.id)).map((p) => view(p, p.score)),
       ];
       this.deps.status.memory("online");
       return { block: this.renderBlock(items, s.promptMaxChars), items, offline: false };
@@ -102,10 +109,13 @@ export class MemoryService {
 
   renderBlock(items: RecalledMemory[], maxChars: number): string {
     if (items.length === 0) return "";
-    const facts = items.filter((i) => i.memoryType === "long_term").map((i) => `- ${i.text}`);
+    const facts = (about: "user" | "project") => items.filter((i) => i.memoryType === "long_term" && (i.about ?? "user") === about).map((i) => `- ${i.text}`);
+    const user = facts("user");
+    const project = facts("project");
     const chunks = items.filter((i) => i.memoryType === "short_term").map((i) => `- ${i.text.replace(/\n+/g, " ")}`);
     const parts: string[] = [];
-    if (facts.length) parts.push(`Known about the user (long-term memory):\n${facts.join("\n")}`);
+    if (user.length) parts.push(`Known about the user (long-term memory):\n${user.join("\n")}`);
+    if (project.length) parts.push(`Known about this project (long-term memory):\n${project.join("\n")}`);
     if (chunks.length) parts.push(`Earlier in this chat (recalled excerpts):\n${chunks.join("\n")}`);
     return clipChars(parts.join("\n\n"), maxChars);
   }
@@ -162,16 +172,18 @@ export class MemoryService {
   }
 
   private async learnFactsLocked(scope: MemoryScope, s: MemorySettings, userText: string, assistantText: string): Promise<void> {
+    if (userText.trim().length < s.factMinUserChars) return;
     const hit = await this.embedOne(userText);
     if (!hit) return;
     const { emb, vec } = hit;
     const filter = this.longTermFilter(scope, s);
     const known = await this.deps.store.search(emb.modelKey, vec, filter, s.factKnownLimit);
-    const knownText = known.length ? known.map((k) => `[${k.id}] ${k.payload.text}`).join("\n") : "(none)";
+    const knownText = known.length ? known.map((k) => `[${k.id}] (${k.payload.workspace_id ? "project" : "user"}) ${k.payload.text}`).join("\n") : "(none)";
     const prompt = render(this.deps.prompts.get("memory/fact_distill.md"), {
       known_facts: knownText,
+      project: scope.workspaceId ?? "(no project folder open)",
       user_message: clipChars(userText, 6000),
-      assistant_message: clipChars(assistantText, 3000),
+      assistant_message: clipChars(assistantText, 1500),
       require_grounding: s.factRequireUserGrounding ? "yes" : "no",
     });
     const model = await this.deps.chat();
@@ -181,12 +193,17 @@ export class MemoryService {
     }
     const ops = parseFactOps(out);
     const knownIds = new Set(known.map((k) => k.id));
+    let added = 0;
     for (const op of ops) {
       if (op.op === "delete" && knownIds.has(op.id)) {
         await this.deps.store.delete([op.id], filter);
-      } else if (op.op === "update" && knownIds.has(op.id)) {
+      } else if (op.op === "update" && knownIds.has(op.id) && factTextOk(op.text, s)) {
         await this.updateFact(op.id, op.text, filter, s, emb);
       } else if (op.op === "add") {
+        if (added >= s.factMaxAddsPerTurn || !factTextOk(op.text, s)) continue;
+        if (s.factRequireUserGrounding && !groundedIn(op.text, userText)) continue;
+        const project = op.about === "project";
+        if (project && !scope.workspaceId) continue;
         const [v] = await emb.embed([op.text]);
         if (!v) continue;
         const near = await this.deps.store.search(emb.modelKey, v, filter, 1);
@@ -194,13 +211,15 @@ export class MemoryService {
         if (top && top.score >= s.factDedupScore) {
           await this.updateFact(top.id, op.text, filter, s, emb, v);
         } else {
-          await this.addFact(scope, op.text, op.category ?? "general", emb, v);
+          await this.addFact(scope, op.text, op.category ?? "general", emb, v, project ? "project" : "user");
+          added++;
         }
       }
     }
   }
 
-  async addFact(scope: MemoryScope, text: string, category: string, emb?: EmbeddingPort, vec?: number[]): Promise<MemoryPoint> {
+  /** `about` "user" facts are kept for every project; "project" facts only for the open folder. */
+  async addFact(scope: MemoryScope, text: string, category: string, emb?: EmbeddingPort, vec?: number[], about: "user" | "project" = "user"): Promise<MemoryPoint> {
     const now = this.deps.clock.now();
     let e = emb;
     let v = vec;
@@ -215,7 +234,7 @@ export class MemoryService {
         memory_type: "long_term",
         kind: "fact",
         category,
-        workspace_id: scope.workspaceId,
+        workspace_id: about === "project" ? scope.workspaceId : null,
         text,
         created_at: now,
         updated_at: now,
@@ -239,6 +258,20 @@ export class MemoryService {
   }
 }
 
+/** One short line of plain text: no code, no pasted output. */
+function factTextOk(text: string, s: MemorySettings): boolean {
+  return text.length >= 8 && text.length <= s.factMaxChars && !/[\n`]/.test(text);
+}
+
+const STOP = new Set(["the", "and", "for", "with", "that", "this", "uses", "user", "users", "project", "prefers", "wants", "should", "always", "never", "from", "into", "when", "their", "they", "have", "has"]);
+
+/** A fact the user's own words support shares at least one meaningful word with them. */
+export function groundedIn(fact: string, userText: string): boolean {
+  const said = new Set(userText.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}._-]*/gu) ?? []);
+  const words = (fact.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}._-]*/gu) ?? []).filter((w) => w.length >= 3 && !STOP.has(w));
+  return words.some((w) => said.has(w) || said.has(w.replace(/s$/, "")) || (w.length >= 4 && [...said].some((x) => x.length >= 4 && (w.startsWith(x) || x.startsWith(w)))));
+}
+
 export function parseFactOps(text: string): FactOp[] {
   const cleaned = text.replace(/<think>[\s\S]*?<\/think>/g, "");
   const m = /\[[\s\S]*\]/.exec(cleaned);
@@ -252,7 +285,7 @@ export function parseFactOps(text: string): FactOp[] {
       const o = raw as Record<string, unknown>;
       const text = typeof o.text === "string" ? o.text.trim() : "";
       const id = typeof o.id === "string" ? o.id : "";
-      if (o.op === "add" && text) ops.push({ op: "add", text, category: typeof o.category === "string" ? o.category : undefined });
+      if (o.op === "add" && text) ops.push({ op: "add", text, category: typeof o.category === "string" ? o.category : undefined, about: o.about === "project" ? "project" : "user" });
       else if (o.op === "update" && id && text) ops.push({ op: "update", id, text });
       else if (o.op === "delete" && id) ops.push({ op: "delete", id });
     }

@@ -13,7 +13,8 @@ interface Stats {
 
 /** Memory "profile" screen: what the agent knows about you, editable. */
 export function MemoryScreen() {
-  const { toast, status, settings } = useApp();
+  const { toast, status, settings, workspace } = useApp();
+  const perProject = settings?.memory.longTermScope === "workspace";
   const [q, setQ] = useState("");
   const [facts, setFacts] = useState<MemoryFactView[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -75,7 +76,9 @@ export function MemoryScreen() {
             <IBrain size={40} />
           </div>
           <div className="flex-1">
-            <div className="smallcaps">Long-term memory · {settings?.memory.longTermScope === "workspace" ? "per project" : "all projects"}</div>
+            <div className="smallcaps">
+              Long-term memory · {perProject ? (workspace ? `about you and ${workspace.name}` : "about you (open a folder for its project facts)") : "all projects"}
+            </div>
             <h1 className="heading m-0 mt-1 text-[44px] leading-none">What I remember</h1>
             <div className="mt-4 flex gap-8 text-[12px] text-dim">
               <Stat n={stats?.facts ?? 0} label="facts" />
@@ -118,10 +121,11 @@ export function MemoryScreen() {
         {adding && (
           <FactEditor
             initial=""
+            projectName={workspace?.name}
             onCancel={() => setAdding(false)}
-            onSave={(text) => {
+            onSave={(text, about) => {
               setAdding(false);
-              void run(() => call("memory:add", { text, category: "preference" }), "Saved");
+              void run(() => call("memory:add", { text, about }), "Saved");
             }}
           />
         )}
@@ -146,7 +150,7 @@ export function MemoryScreen() {
                   <div className="mt-1 text-[11px] text-faint">
                     {new Date(f.updatedAt).toLocaleDateString()}
                     {f.versions > 0 && ` · edited ${f.versions}×`}
-                    {f.workspaceId && ` · ${f.workspaceId.split(/[\\/]/).pop()}`}
+                    {f.workspaceId ? ` · project ${f.workspaceId.split(/[\\/]/).pop()}` : " · about you, every project"}
                   </div>
                 </div>
                 <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -181,16 +185,23 @@ function Stat({ n, label }: { n: number; label: string }) {
   );
 }
 
-function FactEditor({ initial, onSave, onCancel }: { initial: string; onSave: (t: string) => void; onCancel: () => void }) {
+function FactEditor({ initial, projectName, onSave, onCancel }: { initial: string; projectName?: string; onSave: (t: string, about: "user" | "project") => void; onCancel: () => void }) {
   const [t, setT] = useState(initial);
+  const [about, setAbout] = useState<"user" | "project">("user");
   return (
     <div className="card mb-2 p-3">
       <textarea autoFocus className="input h-[70px] resize-none" value={t} onChange={(e) => setT(e.target.value)} placeholder="e.g. I prefer pnpm and strict TypeScript" />
       <div className="mt-2 flex justify-end gap-2">
+        {projectName && (
+          <select className="input mr-auto w-auto py-1 text-[12px]" value={about} onChange={(e) => setAbout(e.target.value as "user" | "project")} data-testid="fact-about">
+            <option value="user">About you (every project)</option>
+            <option value="project">About {projectName} only</option>
+          </select>
+        )}
         <button className="btn btn-sm btn-ghost" onClick={onCancel}>
           Cancel
         </button>
-        <button className="btn btn-sm btn-primary" disabled={!t.trim()} onClick={() => onSave(t.trim())}>
+        <button className="btn btn-sm btn-primary" disabled={!t.trim()} onClick={() => onSave(t.trim(), about)}>
           Save
         </button>
       </div>

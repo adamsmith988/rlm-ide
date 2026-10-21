@@ -1,5 +1,9 @@
 /** State of the IDE-managed OmniRoute gateway, pushed to the renderer on every change. */
 
+/** The one model the pickers show for OmniRoute: it stands for the tested free-model chain (`omniroute.chain`), so the
+ * agent starts on the best free model and moves to the next one whenever a model fails. */
+export const OMNIROUTE_AUTO_MODEL_ID = "omniroute:auto";
+
 export type OmniRoutePhase = "not_installed" | "installing" | "stopped" | "starting" | "running" | "error";
 
 export interface OmniRouteProviderView {

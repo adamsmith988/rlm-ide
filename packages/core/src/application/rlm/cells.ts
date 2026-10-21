@@ -84,8 +84,14 @@ export function syntaxHint(code: string, error: string): string {
   return "";
 }
 
+/** Removes reasoning a model wrote inline: closed blocks, a close tag whose opener was in the prompt template, and a
+ * block the output limit cut off before it closed. */
 export function stripThinking(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/^[\s\S]*?<\/think>/, "").trim();
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/g, "")
+    .replace(/^[\s\S]*?<\/think>/, "")
+    .replace(/<think>[\s\S]*$/, "")
+    .trim();
 }
 
 /** Streaming filter: passes prose through, swallows ```repl ... ``` fences (they are shown as
