@@ -115,7 +115,7 @@ export class McpHub {
 
   /** Send initialize both ways. The framing that answers is the one this server speaks. */
   private initialize(conn: Conn): Promise<unknown> {
-    const params = { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "rlm-ide", version: "0.1.0" } };
+    const params = { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "rlm-ide", version: "0.2.0" } };
     return new Promise((resolve, reject) => {
       const ids: number[] = [];
       let settled = false;
