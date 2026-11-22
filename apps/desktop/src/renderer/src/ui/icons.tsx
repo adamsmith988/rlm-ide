@@ -112,6 +112,36 @@ export const IPaperclip = (p: P) => (
     <path d="m16.5 7.5-6.8 6.8a3 3 0 0 1-4.2-4.2l7.2-7.2a4.5 4.5 0 0 1 6.4 6.4l-7.6 7.6a6 6 0 0 1-8.5-8.5l6.4-6.3" />
   </Svg>
 );
+export const IPlan = (p: P) => (
+  <Svg {...p}>
+    <path d="M9 7h9M9 12h9M9 17h6" />
+    <path d="m4.5 7 1.2 1.2 2-2M4.5 12l1.2 1.2 2-2M4.5 17l1.2 1.2 2-2" />
+  </Svg>
+);
+export const INodes = (p: P) => (
+  <Svg {...p}>
+    <circle cx="7" cy="8" r="2.2" />
+    <circle cx="16.5" cy="7" r="2.2" />
+    <circle cx="12" cy="16.5" r="2.2" />
+    <path d="m8.8 9.2 2.2 5.2M14.6 8.6 13 14.4" />
+  </Svg>
+);
+export const IAsk = (p: P) => (
+  <Svg {...p}>
+    <path d="M6 16.5 4 20l4.2-1.6A8 8 0 1 0 6 16.5z" />
+  </Svg>
+);
+export const ICube = (p: P) => (
+  <Svg {...p}>
+    <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z" />
+    <path d="m12 12 8-4.5M12 12v9M12 12 4 7.5" />
+  </Svg>
+);
+export const IPlug = (p: P) => (
+  <Svg {...p}>
+    <path d="M9 8V3M15 8V3M8 8h8v4a4 4 0 0 1-8 0zM12 16v5" />
+  </Svg>
+);
 export const ICopy = (p: P) => (
   <Svg {...p}>
     <rect x="9" y="9" width="11" height="11" rx="2" />

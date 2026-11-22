@@ -57,6 +57,8 @@ export interface OrchestratorDeps {
   readMention: (path: string) => Promise<string>;
   /** Per-chat task boards and wake-ups; without it the agent has no board and cannot schedule itself. */
   boards?: TaskBoards;
+  /** Catalog of enabled skills for the system prompt. */
+  skillsBlock?: () => string;
 }
 
 /** Application facade: every use case the driving adapters (IPC, tests, evals) call. */
@@ -385,10 +387,11 @@ export class Orchestrator {
           editor,
           clock: new Date(this.d.clock.now()).toString(),
           persona: s.persona,
-          skills: s.skills
-            .filter((sk) => sk.enabled && sk.body.trim())
-            .map((sk) => `### /${sk.name}\n${sk.description}\n${sk.body}`)
-            .join("\n\n"),
+          skills: this.d.skillsBlock?.()
+            ?? s.skills
+              .filter((sk) => sk.enabled && sk.body.trim())
+              .map((sk) => `### /${sk.name}\n${sk.description}\n${sk.body}`)
+              .join("\n\n"),
         },
         limits: modelLimits,
         rlm: s.rlm,

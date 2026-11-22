@@ -26,6 +26,12 @@ export interface ToolHostServices {
     list: () => Promise<unknown>;
     call: (server: string, name: string, args: Record<string, unknown>) => Promise<unknown>;
   };
+  /** User and project skills (Settings plus `.rlm/skills`). */
+  skills?: {
+    list: () => unknown;
+    read: (name: string) => unknown;
+    readFile: (name: string, path: string) => Promise<string>;
+  };
 }
 
 const s = (description: string, extra: Record<string, unknown> = {}) => ({ type: "string" as const, description, ...extra });
@@ -527,6 +533,45 @@ export function createBuiltinTools(svc: ToolHostServices): ToolImpl[] {
     ...(svc.checkPage ? [webCheck(svc.checkPage)] : []),
     ...(svc.browser ? browserTools(svc.browser) : []),
     ...(svc.mcp ? mcpTools(svc.mcp) : []),
+    ...(svc.skills ? skillTools(svc.skills) : []),
+  ];
+}
+
+function skillTools(skills: NonNullable<ToolHostServices["skills"]>): ToolImpl[] {
+  return [
+    tool(
+      {
+        id: "skills.list",
+        group: "skills",
+        description: "List enabled skills (Settings and .rlm/skills) with names, descriptions, and extra files.",
+        parameters: { type: "object", properties: {} },
+        returns: "list[dict(name, description, source, files)]",
+        sideEffects: false,
+      },
+      async () => skills.list(),
+    ),
+    tool(
+      {
+        id: "skills.read",
+        group: "skills",
+        description: "Load the full instructions for one skill. Call this when the request matches a skill, then follow every step.",
+        parameters: { type: "object", properties: { name: s("Skill name without the leading slash") }, required: ["name"] },
+        returns: "dict(name, description, source, body, files)",
+        sideEffects: false,
+      },
+      async (a) => skills.read(String(a.name).replace(/^\//, "")),
+    ),
+    tool(
+      {
+        id: "skills.read_file",
+        group: "skills",
+        description: "Read an extra file from a project skill folder (format.md, scripts, examples).",
+        parameters: { type: "object", properties: { name: s("Skill name"), path: s("Path relative to the skill folder") }, required: ["name", "path"] },
+        returns: "str",
+        sideEffects: false,
+      },
+      (a) => skills.readFile(String(a.name).replace(/^\//, ""), String(a.path)),
+    ),
   ];
 }
 

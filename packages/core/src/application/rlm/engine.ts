@@ -313,7 +313,9 @@ export class RlmEngine {
     let compactSys: string | null = null;
     const resume = this.deps.prompts.get("rlm/compact_resume.md");
     const isRoot = agentPath.length === 0;
-    const blocks: HostBlocks = isRoot ? { ...input.blocks } : { memory: "", pinned: "", editor: input.blocks.editor, clock: input.blocks.clock, persona: "" };
+    const blocks: HostBlocks = isRoot
+      ? { ...input.blocks }
+      : { memory: "", pinned: "", editor: input.blocks.editor, clock: input.blocks.clock, persona: "", skills: input.blocks.skills };
     const usage = { inputTokens: 0, outputTokens: 0 };
     const workLog: string[] = [];
     let lastText = "";

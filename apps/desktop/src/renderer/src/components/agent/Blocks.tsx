@@ -84,14 +84,16 @@ function Disclosure({ label, icon, right, children, defaultOpen = false, tone }:
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="overflow-hidden rounded-[12px] border border-line bg-surface">
-      <button className="flex w-full items-center gap-2 px-3 py-[7px] text-left text-[12px]" onClick={() => setOpen(!open)}>
-        <IChevron size={12} className="shrink-0 text-faint" style={{ transform: open ? "rotate(90deg)" : undefined, transition: "transform .12s" }} />
-        {icon && <span className="shrink-0 text-dim">{icon}</span>}
-        <span className="min-w-0 flex-1 truncate" style={{ color: tone === "err" ? "var(--err)" : undefined }}>
-          {label}
-        </span>
+      <div className="flex w-full items-center gap-2 px-3 py-[7px] text-left text-[12px]">
+        <button className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!open)}>
+          <IChevron size={12} className="shrink-0 text-faint" style={{ transform: open ? "rotate(90deg)" : undefined, transition: "transform .12s" }} />
+          {icon && <span className="shrink-0 text-dim">{icon}</span>}
+          <span className="min-w-0 flex-1 truncate" style={{ color: tone === "err" ? "var(--err)" : undefined }}>
+            {label}
+          </span>
+        </button>
         {right}
-      </button>
+      </div>
       {open && <div className="border-t border-line">{children}</div>}
     </div>
   );
@@ -324,15 +326,14 @@ export function SubAgent({ b, work, onChat }: { b: Extract<Block, { kind: "subag
           <span className="flex items-center gap-2 text-[11px]">
             {!b.done ? <span className="pulse text-dim">working</span> : b.ok ? <ICheck size={13} className="text-ok" /> : <span className="text-err">failed</span>}
             {onChat && (
-              <span
+              <button
+                type="button"
                 className="rounded-full border border-line px-2 py-[1px] text-dim hover:text-ink"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChat();
-                }}
+                data-testid="subagent-chat"
+                onClick={onChat}
               >
                 Chat
-              </span>
+              </button>
             )}
           </span>
         }

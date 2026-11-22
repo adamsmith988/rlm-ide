@@ -63,9 +63,21 @@ function Dir({
     call<DirEntry[]>("fs:readDir", { path }).then(setEntries, () => setEntries([]));
   }, [path, version]);
   if (!entries) return null;
+  const present = new Set(entries.map((e) => e.path));
+  const prefix = path ? `${path}/` : "";
+  const deleted: DirEntry[] = [];
+  for (const [file, code] of git) {
+    if (!code.includes("D")) continue;
+    const rest = prefix ? (file.startsWith(prefix) ? file.slice(prefix.length) : "") : file;
+    if (!rest || rest.includes("/") || present.has(file)) continue;
+    deleted.push({ name: rest, path: file, kind: "file" });
+  }
   return (
     <>
       {entries.map((e) => (
+        <Node key={e.path} entry={e} depth={depth} version={version} onCreate={onCreate} creating={creating} git={git} />
+      ))}
+      {deleted.map((e) => (
         <Node key={e.path} entry={e} depth={depth} version={version} onCreate={onCreate} creating={creating} git={git} />
       ))}
     </>

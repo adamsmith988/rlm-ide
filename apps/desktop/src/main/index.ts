@@ -296,6 +296,7 @@ const ORCH_CHANNELS = new Set<IpcChannel>([
   "edits:resolve",
   "models:detect",
   "models:test",
+  "skills:list",
 ]);
 
 async function handle(channel: IpcChannel, payload: Record<string, unknown>): Promise<unknown> {

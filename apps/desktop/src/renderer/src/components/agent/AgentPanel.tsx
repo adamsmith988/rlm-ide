@@ -169,11 +169,22 @@ function UserMsg({ m }: { m: UiMessage }) {
     );
   }
   const split = ATTACHED_RE.exec(m.text);
-  const typed = split ? m.text.slice(0, split.index) : m.text;
+  const body = split ? m.text.slice(0, split.index) : m.text;
+  const skill = /^\*\*Skill: ([\w.-]+)\.\*\*[^\n]*\n\n/.exec(body);
+  const afterSkill = skill ? body.slice(skill[0].length) : body;
+  const mode = /^\*\*Mode: (Plan|Debug|Multitask|Ask)\.\*\*[^\n]*\n\n/.exec(afterSkill);
+  const typed = mode ? afterSkill.slice(mode[0].length) : afterSkill;
   return (
     <div className="mt-4 flex flex-col items-end gap-1.5 fade-in">
       <div className="group relative max-w-[88%]">
-        <div className="selectable whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[13px] text-bg">{typed}</div>
+        <div className="selectable whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[13px] text-bg">
+          {(skill || mode) && (
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.08em] opacity-70">
+              {[skill?.[1], mode?.[1]].filter(Boolean).join(" · ")}
+            </div>
+          )}
+          {typed}
+        </div>
         <button
           className="iconbtn absolute -left-7 top-1 h-6 w-6 opacity-0 group-hover:opacity-100"
           title="Copy message"

@@ -1,6 +1,7 @@
 export * from "./fs/confine";
 export * from "./tools/shell";
 export * from "./tools/builtin";
+export * from "./skills";
 export * from "./kernel/python_kernel";
 export * from "./db/sqlite";
 export * from "./db/repos";

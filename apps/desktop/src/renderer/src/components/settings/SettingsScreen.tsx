@@ -31,7 +31,7 @@ export function SettingsScreen() {
           <h1 className="heading m-0 mt-1 text-[44px] leading-none">Settings</h1>
           <div className="mt-6 grid grid-cols-4 gap-2.5 lg:grid-cols-8">
             {CATEGORIES.map(([id, label]) => (
-              <button key={id} className={`tile ${cat === id ? "on" : ""}`} onClick={() => setCat(id)}>
+              <button key={id} className={`tile ${cat === id ? "on" : ""}`} data-testid={`settings-${id}`} onClick={() => setCat(id)}>
                 {label}
               </button>
             ))}
@@ -113,10 +113,26 @@ function SkillsMcpSection({ s }: { s: Settings }) {
   const patch = usePatch();
   const skills = s.skills;
   const mcp = s.mcp;
+  const [project, setProject] = useState<Array<{ name: string; description: string; files: string[] }>>([]);
+  useEffect(() => {
+    void call<Array<{ name: string; description: string; source: string; files: string[] }>>("skills:list", {})
+      .then((list) => setProject(list.filter((x) => x.source === "project")))
+      .catch(() => setProject([]));
+  }, [s.skills]);
   const setSkill = (id: string, p: Partial<(typeof skills)[number]>) => patch({ skills: skills.map((x) => (x.id === id ? { ...x, ...p } : x)) });
   return (
     <>
-      <Section title="Skills" hint="Enabled skills are in the agent's instructions. Type /name in the chat to insert one. Names are letters, numbers, dots, and dashes.">
+      <Section title="Project skills" hint="Folders in .rlm/skills/<name>/ with a SKILL.md. The agent loads them with skills.read and extra files with skills.read_file.">
+        {project.length === 0 && <div className="text-[12px] text-dim">No project skills yet. Add .rlm/skills/&lt;name&gt;/SKILL.md in this folder.</div>}
+        {project.map((sk) => (
+          <div key={sk.name} className="mb-2 rounded-[12px] border border-line px-3 py-2" data-testid="project-skill">
+            <div className="font-code text-[13px]">/{sk.name}</div>
+            {sk.description && <div className="mt-0.5 text-[12px] text-dim">{sk.description}</div>}
+            {sk.files.length > 0 && <div className="mt-1 text-[11px] text-faint">{sk.files.join(" · ")}</div>}
+          </div>
+        ))}
+      </Section>
+      <Section title="Your skills" hint="These follow you across projects. Write the full procedure. The agent loads them with skills.read when a request matches. Names are letters, numbers, dots, and dashes.">
         {skills.map((sk) => (
           <div key={sk.id} className="mb-3 rounded-[12px] border border-line p-3" data-testid="skill-editor">
             <div className="mb-2 flex items-center gap-2">
@@ -127,7 +143,7 @@ function SkillsMcpSection({ s }: { s: Settings }) {
                 Remove
               </button>
             </div>
-            <textarea className="input min-h-[88px] w-full p-2 font-code text-[12px]" value={sk.body} placeholder="Instructions inserted when the user types /name" onChange={(e) => setSkill(sk.id, { body: e.target.value })} />
+            <textarea className="input min-h-[88px] w-full p-2 font-code text-[12px]" value={sk.body} placeholder="Full procedure the agent must follow" onChange={(e) => setSkill(sk.id, { body: e.target.value })} />
           </div>
         ))}
         <button

@@ -73,7 +73,7 @@ export const RlmSettings = z.object({
   sandboxNoNetwork: z.boolean().default(true),
 });
 
-/** A reusable instruction the user can insert with /name and that the agent sees while it is enabled. */
+/** A reusable procedure the agent loads with skills.read. Project copies also live in `.rlm/skills/<name>/SKILL.md`. */
 export const SkillConfig = z.object({
   id: z.string().min(1).max(80),
   name: z.string().min(1).max(40).regex(/^[\w.-]+$/),

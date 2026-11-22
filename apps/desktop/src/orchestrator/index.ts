@@ -30,6 +30,7 @@ import {
 import { cpuThreads } from "@rlm/inference/src/cpu";
 import { BgeM3Embedder } from "@rlm/inference/src/embed_bge";
 import { McpHub } from "./mcp";
+import { SkillHub } from "./skills";
 
 interface ParentPort {
   on(ev: "message", cb: (e: { data: Record<string, unknown>; ports: MessagePortLike[] }) => void): void;
@@ -46,6 +47,7 @@ const parent = (process as unknown as { parentPort: ParentPort }).parentPort;
 const post = (m: unknown) => parent.postMessage(m);
 const log = new ConsoleLogger();
 const mcp = new McpHub((m) => log.info(m));
+const skills = new SkillHub();
 
 let settings: Settings = Settings.parse({});
 let keys: Record<string, string> = {};
@@ -229,6 +231,11 @@ function init(i: Record<string, unknown>): void {
         list: async () => mcp.status(),
         call: (server, name, args) => mcp.call(server, name, args),
       },
+      skills: {
+        list: () => skills.list(),
+        read: (name) => skills.read(name),
+        readFile: (name, rel) => skills.readFile(name, rel),
+      },
     }),
     ...boards.tools(),
   ]);
@@ -257,10 +264,12 @@ function init(i: Record<string, unknown>): void {
       return fsp.readFile(resolveInside(root, p), "utf8");
     },
     boards,
+    skillsBlock: () => skills.catalog(),
   });
   void orch.startScheduler();
   publishModel();
   void mcp.sync(settings.mcp);
+  void skills.sync(settings.skills, workspace.root());
 }
 
 function boardView(b: TaskBoard) {
@@ -293,8 +302,10 @@ const methods: Record<string, Handler> = {
     const changed = workspace!.root() !== root;
     const r = workspace!.set(root);
     if (changed) await orch!.workspaceChanged();
+    await skills.sync(settings.skills, workspace!.root());
     return r;
   },
+  "skills:list": () => skills.list(),
   "kernel:sandbox": () => kernels!.sandboxInfo(),
   "chat:list": () => orch!.listChats(),
   "chat:create": (a) => orch!.createChat(String(a.title ?? "New chat")),
@@ -450,6 +461,7 @@ parent.on("message", (e) => {
         router?.invalidate();
         publishModel();
         void mcp.sync(settings.mcp);
+        void skills.sync(settings.skills, workspace?.root() ?? null);
         break;
       case "host-response": {
         const p = hostPending.get(m.id as number);
