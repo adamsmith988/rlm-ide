@@ -107,6 +107,11 @@ export const IArrowDown = (p: P) => (
     <path d="M12 5v14M6 13l6 6 6-6" />
   </Svg>
 );
+export const IPaperclip = (p: P) => (
+  <Svg {...p}>
+    <path d="m16.5 7.5-6.8 6.8a3 3 0 0 1-4.2-4.2l7.2-7.2a4.5 4.5 0 0 1 6.4 6.4l-7.6 7.6a6 6 0 0 1-8.5-8.5l6.4-6.3" />
+  </Svg>
+);
 export const ICopy = (p: P) => (
   <Svg {...p}>
     <rect x="9" y="9" width="11" height="11" rx="2" />

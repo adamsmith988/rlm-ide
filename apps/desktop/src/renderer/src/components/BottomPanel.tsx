@@ -4,14 +4,16 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { api, call, errText } from "../api";
 import { useApp } from "../store";
-import { IClose, IPlus } from "../ui/icons";
+import { IClose, ICopy, IPlus } from "../ui/icons";
 
 export function BottomPanel() {
   const { bottomTab, set, diagnostics } = useApp();
   const [terms, setTerms] = useState<number[]>([1]);
   const [activeTerm, setActiveTerm] = useState(1);
+  const agentLog = useApp((s) => s.agentLog);
   const tabsDef: Array<[typeof bottomTab, string]> = [
     ["terminal", "Terminal"],
+    ["output", "Agent"],
     ["problems", `Problems${diagnostics.length ? ` · ${diagnostics.length}` : ""}`],
   ];
   return (
@@ -75,6 +77,23 @@ export function BottomPanel() {
             <XTerm visible={bottomTab === "terminal" && t === activeTerm} />
           </div>
         ))}
+        {bottomTab === "output" && (
+          <div className="absolute inset-0 flex flex-col" data-testid="agent-output">
+            <div className="flex justify-end px-2">
+              <button
+                className="iconbtn h-6 w-6"
+                title="Copy agent output"
+                onClick={() => {
+                  void navigator.clipboard.writeText(agentLog);
+                  useApp.getState().toast("Copied");
+                }}
+              >
+                <ICopy size={12} />
+              </button>
+            </div>
+            <pre className="selectable min-h-0 flex-1 overflow-auto px-3 pb-2 font-code text-[11.5px] leading-[1.45] text-dim">{agentLog || "The agent's code output shows up here while it runs."}</pre>
+          </div>
+        )}
         {bottomTab === "problems" && <Problems />}
       </div>
     </div>

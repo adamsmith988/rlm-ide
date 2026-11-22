@@ -9,6 +9,23 @@ type ToolBlock = Extract<Block, { kind: "tool" }>;
 export type RenderBlock = Block | { kind: "cellGroup"; cell: Extract<Block, { kind: "cell" }>; tools: ToolBlock[] };
 
 /** Attach the tool calls a cell made (they stream right after it, same agent) to that cell. */
+/** Cells and tools a sub-agent ran are shown inside that sub-agent, not in the main transcript. */
+export function presentBlocks(blocks: Block[]): { main: RenderBlock[]; byAgent: Map<string, RenderBlock[]> } {
+  const owned = new Set<number>();
+  const extra = new Map<string, Block[]>();
+  blocks.forEach((b, i) => {
+    if ((b.kind === "cell" || b.kind === "tool") && b.agentPath.length) {
+      const id = b.agentPath[b.agentPath.length - 1]!;
+      owned.add(i);
+      extra.set(id, [...(extra.get(id) ?? []), b]);
+    }
+  });
+  return {
+    main: groupBlocks(blocks.filter((_, i) => !owned.has(i))),
+    byAgent: new Map([...extra.entries()].map(([id, list]) => [id, groupBlocks(list)])),
+  };
+}
+
 export function groupBlocks(blocks: Block[]): RenderBlock[] {
   const out: RenderBlock[] = [];
   for (const b of blocks) {
@@ -195,7 +212,9 @@ function Tool({ b }: { b: Extract<Block, { kind: "tool" }> }) {
 function Approval({ b }: { b: Extract<Block, { kind: "approval" }> }) {
   const toast = useApp((s) => s.toast);
   const [busy, setBusy] = useState(false);
+  const closed = !!b.resolved || !!b.skipped;
   const answer = async (approved: boolean, remember: "once" | "session" | "workspace" = "once") => {
+    if (closed) return;
     setBusy(true);
     try {
       await call("chat:approve", { approvalId: b.approvalId, approved, remember });
@@ -205,7 +224,7 @@ function Approval({ b }: { b: Extract<Block, { kind: "approval" }> }) {
     }
   };
   return (
-    <div className="rounded-[14px] border-[1.5px] p-3" style={{ borderColor: b.resolved ? "var(--border)" : "var(--text)" }}>
+    <div className="rounded-[14px] border-[1.5px] p-3" style={{ borderColor: closed ? "var(--border)" : "var(--text)" }} data-testid="approval">
       <div className="flex items-center gap-2">
         <span className="smallcaps" style={{ color: "var(--text)" }}>
           Approval
@@ -214,24 +233,23 @@ function Approval({ b }: { b: Extract<Block, { kind: "approval" }> }) {
         <span className="mono truncate text-[11px] text-dim">{argSummary(b.call.args).slice(0, 80)}</span>
       </div>
       {b.preview && <pre className="selectable mono mt-2 max-h-[260px] overflow-auto rounded-[8px] bg-surface-2 px-3 py-2 text-[11px] leading-[1.5]">{colorDiff(b.preview)}</pre>}
-      {b.resolved ? (
-        <div className="mt-2 text-[12px]" style={{ color: b.approved ? "var(--ok)" : "var(--err)" }}>
-          {b.approved ? "Allowed" : "Denied"}
-        </div>
-      ) : (
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void answer(true)}>
-            Allow once
-          </button>
-          <button className="btn btn-sm" disabled={busy} onClick={() => void answer(true, "session")}>
-            This chat
-          </button>
-          <button className="btn btn-sm" disabled={busy} onClick={() => void answer(true, "workspace")}>
-            Always here
-          </button>
-          <button className="btn btn-sm btn-danger ml-auto" disabled={busy} onClick={() => void answer(false)}>
-            Deny
-          </button>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button className="btn btn-primary btn-sm" disabled={busy || closed} onClick={() => void answer(true)}>
+          Allow once
+        </button>
+        <button className="btn btn-sm" disabled={busy || closed} onClick={() => void answer(true, "session")}>
+          This chat
+        </button>
+        <button className="btn btn-sm" disabled={busy || closed} onClick={() => void answer(true, "workspace")}>
+          Always here
+        </button>
+        <button className="btn btn-sm btn-danger ml-auto" disabled={busy || closed} onClick={() => void answer(false)}>
+          Deny
+        </button>
+      </div>
+      {closed && (
+        <div className="mt-2 text-[12px]" style={{ color: b.skipped ? "var(--text-dim)" : b.approved ? "var(--ok)" : "var(--err)" }}>
+          {b.skipped ? "Skipped" : b.approved ? "Allowed" : "Denied"}
         </div>
       )}
     </div>
@@ -290,25 +308,44 @@ function Memory({ b }: { b: Extract<Block, { kind: "memory" }> }) {
   );
 }
 
-function SubAgent({ b }: { b: Extract<Block, { kind: "subagent" }> }) {
+export function SubAgent({ b, work, onChat }: { b: Extract<Block, { kind: "subagent" }>; work?: RenderBlock[]; onChat?: () => void }) {
   return (
-    <div style={{ marginLeft: Math.max(0, b.parentPath.length - 1) * 14 }}>
+    <div style={{ marginLeft: Math.max(0, b.parentPath.length - 1) * 14 }} data-testid="subagent">
       <Disclosure
         icon={<ISpark size={13} />}
+        defaultOpen={!b.done}
         tone={b.done && !b.ok ? "err" : undefined}
         label={
           <span>
             <span className="font-semibold">Sub-agent</span> <span className="text-dim">{b.task.slice(0, 90)}</span>
           </span>
         }
-        right={<span className="text-[11px]">{!b.done ? <span className="pulse text-dim">working</span> : b.ok ? <ICheck size={13} className="text-ok" /> : <span className="text-err">failed</span>}</span>}
+        right={
+          <span className="flex items-center gap-2 text-[11px]">
+            {!b.done ? <span className="pulse text-dim">working</span> : b.ok ? <ICheck size={13} className="text-ok" /> : <span className="text-err">failed</span>}
+            {onChat && (
+              <span
+                className="rounded-full border border-line px-2 py-[1px] text-dim hover:text-ink"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChat();
+                }}
+              >
+                Chat
+              </span>
+            )}
+          </span>
+        }
       >
-        <div className="px-3 py-2">
-          <div className="smallcaps mb-1">Task</div>
+        <div className="flex flex-col gap-2 px-3 py-2">
           <div className="selectable whitespace-pre-wrap text-[12px]">{b.task}</div>
+          {b.log && <div className="selectable whitespace-pre-wrap text-[12px] text-dim">{b.log}</div>}
+          {work?.map((w, i) => (
+            <BlockView key={i} block={w} running={!b.done} last={i === work.length - 1} />
+          ))}
           {b.result && (
             <>
-              <div className="smallcaps mb-1 mt-2">Result</div>
+              <div className="smallcaps">Result</div>
               <Markdown text={b.result} />
             </>
           )}

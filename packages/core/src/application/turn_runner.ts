@@ -116,7 +116,9 @@ export class TurnRunner implements ApprovalRequester {
     const approvalId = newId("appr");
     return new Promise<{ approved: boolean; remember: "once" | "session" | "workspace" }>((resolve) => {
       const onAbort = () => {
+        if (!this.approvals.has(approvalId)) return;
         this.approvals.delete(approvalId);
+        this.emit(turnId, { type: "approval_resolved", approvalId, approved: false, skipped: true });
         resolve({ approved: false, remember: "once" });
       };
       if (signal.aborted) return onAbort();

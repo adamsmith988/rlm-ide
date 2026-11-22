@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { BrowserState, ChatSummary, OrchestratorStatus, Settings, StoredMessage, TaskBoardView, TurnEvent } from "@rlm/contracts";
 import { call, errText } from "./api";
-import { applyEvent, type ContextUsage, type UiMessage } from "./chat/model";
+import { applyEvent, settleApprovals, type ContextUsage, type UiMessage } from "./chat/model";
 
 /** Last segment of an absolute folder path (Windows or POSIX separators). */
 export const baseName = (p: string): string => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
@@ -22,7 +22,9 @@ export interface Tab {
 /** Something from the browser the user attached to the next message. */
 export type Attachment =
   | { id: string; kind: "screenshot"; image: string; pageUrl: string; title: string; width: number; height: number }
-  | { id: string; kind: "element"; image: string | null; pageUrl: string; title: string; selector: string; tag: string; text: string; html: string };
+  | { id: string; kind: "element"; image: string | null; pageUrl: string; title: string; selector: string; tag: string; text: string; html: string }
+  | { id: string; kind: "image"; name: string; path: string; image: string }
+  | { id: string; kind: "file"; name: string; path: string; text: string };
 
 interface Toast {
   id: number;
@@ -56,6 +58,8 @@ export interface AppState {
   browser: boolean;
   browserState: BrowserState;
   attachments: Attachment[];
+  /** Live output of the code the agent is running, shown in the bottom panel. */
+  agentLog: string;
 
   set(p: Partial<AppState>): void;
   openInBrowser(url: string): Promise<void>;
@@ -90,6 +94,11 @@ let toastId = 0;
 
 /** Attachments travel inside the message text so the model reads them and the transcript shows them. */
 function attachmentMarkdown(a: Attachment): string {
+  if (a.kind === "image") return `**Attached image** \`${a.name}\` (${a.path})\n\n![${a.name}](${a.image})`;
+  if (a.kind === "file") {
+    const fence = a.text.includes("```") ? "~~~" : "```";
+    return `**Attached file** \`${a.name}\` (${a.path})\n\n${fence}\n${a.text}\n${fence}`;
+  }
   const page = `[${(a.title || a.pageUrl).replace(/[[\]]/g, "")}](${a.pageUrl})`;
   if (a.kind === "screenshot") return `**Browser screenshot** of ${page} (${a.width}×${a.height})\n\n![screenshot](${a.image})`;
   const fence = a.html.includes("```") ? "~~~" : "```";
@@ -110,6 +119,7 @@ function toUi(m: StoredMessage): UiMessage {
   if (m.role === "assistant") {
     ui.status = m.status;
     if (!ui.blocks.some((b) => b.kind === "text") && m.text) ui.blocks.push({ kind: "text", text: m.text });
+    if (ui.status !== "running") ui.blocks = settleApprovals(ui.blocks);
   }
   return ui;
 }
@@ -138,8 +148,9 @@ export const useApp = create<AppState>((set, get) => ({
   toasts: [],
   treeVersion: 0,
   browser: false,
-  browserState: { open: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, devtools: false, picking: false, agent: null, error: null },
+  browserState: { open: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, devtools: false, picking: false, agent: null, error: null, tabs: [], activeId: null, console: [] },
   attachments: [],
+  agentLog: "",
 
   set: (p) => set(p),
 
@@ -337,6 +348,12 @@ export const useApp = create<AppState>((set, get) => ({
       next[i] = applyEvent(next[i]!, ev);
       const patch: Partial<AppState> = { messages: { ...msgs, [chatId]: next } };
       if (ev.type === "context_usage") patch.context = { ...get().context, [chatId]: ev };
+      if (ev.type === "code_cell" || ev.type === "cell_output") {
+        const line = ev.type === "code_cell" ? `\n\n$ ${ev.agentPath.length ? "sub-agent " : ""}python\n${ev.code}\n` : ev.text;
+        patch.agentLog = `${get().agentLog}${line}`.slice(-40000);
+        patch.bottom = true;
+        patch.bottomTab = "output";
+      }
       set(patch);
       if (ev.type === "pending_edit") {
         const t = get().tabs.find((x) => x.kind === "file" && x.path === ev.path);

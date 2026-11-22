@@ -56,6 +56,12 @@ export const IpcSchemas = {
   "chat:activeTurn": z.object({ chatId: z.string() }),
   "chat:approve": z.object({ approvalId: z.string(), approved: z.boolean(), remember: z.enum(["once", "session", "workspace"]).default("once") }),
   "chat:feedback": z.object({ messageId: z.string(), value: z.enum(["up", "down", "none"]) }),
+  /** Markdown transcript plus a JSON backup of one chat in the open project. */
+  "chat:export": z.object({ chatId: z.string().min(1) }),
+  "dialog:openFiles": z.object({
+    title: z.string().max(120).default("Attach files"),
+    images: z.boolean().default(false),
+  }),
   "chat:checkpoint": z.object({ chatId: z.string() }),
   "task:board": z.object({ chatId: z.string() }),
   "task:cancelWakeup": z.object({ chatId: z.string() }),
@@ -84,6 +90,8 @@ export const IpcSchemas = {
   "browser:state": z.object({}),
   "browser:screenshot": z.object({}),
   "browser:pick": z.object({}),
+  "browser:tab": z.object({ action: z.enum(["new", "close", "select"]), id: z.string().max(40).optional(), url: z.string().max(4000).optional() }),
+  "browser:console": z.object({}),
   "git:branches": z.object({}),
   "git:checkout": z.object({ branch: z.string().min(1).max(200).regex(/^[\w./-]+$/), create: z.boolean().default(false) }),
   "hub:state": z.object({}),
@@ -298,6 +306,17 @@ export interface RlmApi {
   window: { minimize(): void; maximize(): void; close(): void; platform: string };
 }
 
+export interface BrowserConsoleLine {
+  level: string;
+  text: string;
+}
+
+export interface BrowserTabInfo {
+  id: string;
+  url: string;
+  title: string;
+}
+
 export interface BrowserState {
   open: boolean;
   url: string;
@@ -309,6 +328,10 @@ export interface BrowserState {
   picking: boolean;
   agent: string | null;
   error: string | null;
+  tabs: BrowserTabInfo[];
+  activeId: string | null;
+  /** Console of the active tab, oldest first, capped. */
+  console: BrowserConsoleLine[];
 }
 
 export interface BrowserScreenshot {

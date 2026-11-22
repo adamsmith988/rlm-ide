@@ -5,10 +5,10 @@ export type Block =
   | { kind: "thinking"; text: string }
   | { kind: "cell"; cellId: string; code: string; output: string; ok?: boolean; error?: string; durationMs?: number; agentPath: string[] }
   | { kind: "tool"; call: ToolCallInfo; ok?: boolean; result?: unknown; durationMs?: number; deduped?: boolean; agentPath: string[] }
-  | { kind: "approval"; approvalId: string; call: ToolCallInfo; preview?: string; resolved?: boolean; approved?: boolean }
+  | { kind: "approval"; approvalId: string; call: ToolCallInfo; preview?: string; resolved?: boolean; approved?: boolean; skipped?: boolean }
   | { kind: "compaction"; checkpoint: CheckpointInfo }
   | { kind: "memory"; items: RecalledMemory[]; offline: boolean }
-  | { kind: "subagent"; agentId: string; parentPath: string[]; task: string; done?: boolean; ok?: boolean; result?: string }
+  | { kind: "subagent"; agentId: string; parentPath: string[]; task: string; done?: boolean; ok?: boolean; result?: string; log?: string }
   | { kind: "edit"; editId: string; path: string; before: string; after: string }
   | { kind: "status"; text: string }
   | { kind: "switch"; from: string; to: string; reason: string; resumed: boolean }
@@ -120,7 +120,7 @@ export function applyEvent(m: UiMessage, ev: TurnEvent): UiMessage {
       break;
     case "approval_resolved": {
       const i = findLast(blocks, (b) => b.kind === "approval" && b.approvalId === ev.approvalId);
-      if (i >= 0) blocks[i] = { ...(blocks[i] as Extract<Block, { kind: "approval" }>), resolved: true, approved: ev.approved };
+      if (i >= 0) blocks[i] = { ...(blocks[i] as Extract<Block, { kind: "approval" }>), resolved: true, approved: ev.approved, skipped: ev.skipped };
       break;
     }
     case "compaction":
@@ -130,8 +130,16 @@ export function applyEvent(m: UiMessage, ev: TurnEvent): UiMessage {
       if (ev.items.length || ev.offline) blocks.push({ kind: "memory", items: ev.items, offline: ev.offline });
       break;
     case "subagent_started":
-      blocks.push({ kind: "subagent", agentId: ev.agentId, parentPath: ev.parentPath, task: ev.task });
+      blocks.push({ kind: "subagent", agentId: ev.agentId, parentPath: ev.parentPath, task: ev.task, log: "" });
       break;
+    case "subagent_delta": {
+      const i = findLast(blocks, (b) => b.kind === "subagent" && b.agentId === ev.agentId);
+      if (i >= 0) {
+        const b = blocks[i] as Extract<Block, { kind: "subagent" }>;
+        blocks[i] = { ...b, log: (b.log ?? "") + ev.text };
+      }
+      break;
+    }
     case "subagent_done": {
       const i = findLast(blocks, (b) => b.kind === "subagent" && b.agentId === ev.agentId);
       if (i >= 0) blocks[i] = { ...(blocks[i] as Extract<Block, { kind: "subagent" }>), done: true, ok: ev.ok, result: ev.result };
@@ -145,17 +153,17 @@ export function applyEvent(m: UiMessage, ev: TurnEvent): UiMessage {
       next.text = ev.finalText;
       next.usage = ev.usage;
       next.endedAt = ev.ts;
-      next.blocks = blocks.filter((b) => b.kind !== "status");
+      next.blocks = settleApprovals(blocks.filter((b) => b.kind !== "status"));
       break;
     case "turn_error":
       next.status = "error";
       next.endedAt = ev.ts;
-      next.blocks = [...blocks.filter((b) => b.kind !== "status"), { kind: "error", text: ev.message }];
+      next.blocks = [...settleApprovals(blocks.filter((b) => b.kind !== "status")), { kind: "error", text: ev.message }];
       break;
     case "turn_cancelled":
       next.status = "cancelled";
       next.endedAt = ev.ts;
-      next.blocks = blocks.filter((b) => b.kind !== "status");
+      next.blocks = settleApprovals(blocks.filter((b) => b.kind !== "status"));
       break;
     default:
       break;
@@ -174,6 +182,11 @@ function resumedText(blocks: Block[]): number {
     else if (b.kind !== "thinking" && b.kind !== "status") return -1;
   }
   return -1;
+}
+
+/** An approval nobody answered is skipped once the turn ends, and its buttons stay disabled. */
+export function settleApprovals(blocks: Block[]): Block[] {
+  return blocks.map((b) => (b.kind === "approval" && !b.resolved ? { ...b, resolved: true, approved: false, skipped: true } : b));
 }
 
 function findLast<T>(arr: T[], pred: (x: T) => boolean): number {

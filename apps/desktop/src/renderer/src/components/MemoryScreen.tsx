@@ -111,7 +111,7 @@ export function MemoryScreen() {
           <button
             className="btn btn-sm btn-danger"
             onClick={() => {
-              if (confirm("Forget everything? This deletes all long-term facts and chat memory.")) void run(() => call("memory:forgetAll", {}), "Memory cleared");
+              if (confirm("Clear this project's facts and chat memory? Facts about you stay. Other projects are not touched.")) void run(() => call("memory:forgetAll", {}), "This project's memory cleared");
             }}
           >
             Forget all

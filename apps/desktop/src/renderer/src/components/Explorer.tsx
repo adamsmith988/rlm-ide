@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { DirEntry } from "@rlm/contracts";
+import type { DirEntry, GitFileStatus } from "@rlm/contracts";
 import { call, errText } from "../api";
 import { useApp } from "../store";
 import { IChevron, IFile, IFolder, IPlus, IRefresh } from "../ui/icons";
@@ -7,6 +7,12 @@ import { IChevron, IFile, IFolder, IPlus, IRefresh } from "../ui/icons";
 export function Explorer() {
   const { workspace, treeVersion, set } = useApp();
   const [creating, setCreating] = useState<null | { kind: "file" | "dir"; parent: string }>(null);
+  const [git, setGit] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    void call<GitFileStatus[]>("git:status", {})
+      .then((files) => setGit(new Map(files.map((f) => [f.path.replace(/\\/g, "/"), f.code]))))
+      .catch(() => setGit(new Map()));
+  }, [treeVersion, workspace?.root]);
   return (
     <div className="flex h-full flex-col">
       <PanelHeader title={workspace?.name ?? "Explorer"}>
@@ -22,7 +28,7 @@ export function Explorer() {
       </PanelHeader>
       <div className="min-h-0 flex-1 overflow-auto py-1">
         {creating && creating.parent === "" && <NewEntry kind={creating.kind} parent="" depth={0} done={() => setCreating(null)} />}
-        <Dir path="" depth={0} version={treeVersion} onCreate={setCreating} creating={creating} />
+        <Dir path="" depth={0} version={treeVersion} onCreate={setCreating} creating={creating} git={git} />
       </div>
     </div>
   );
@@ -43,12 +49,14 @@ function Dir({
   version,
   onCreate,
   creating,
+  git,
 }: {
   path: string;
   depth: number;
   version: number;
   onCreate: (c: { kind: "file" | "dir"; parent: string } | null) => void;
   creating: { kind: "file" | "dir"; parent: string } | null;
+  git: Map<string, string>;
 }) {
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   useEffect(() => {
@@ -58,10 +66,18 @@ function Dir({
   return (
     <>
       {entries.map((e) => (
-        <Node key={e.path} entry={e} depth={depth} version={version} onCreate={onCreate} creating={creating} />
+        <Node key={e.path} entry={e} depth={depth} version={version} onCreate={onCreate} creating={creating} git={git} />
       ))}
     </>
   );
+}
+
+function gitTone(code: string | undefined): "add" | "del" | "mod" | null {
+  if (!code) return null;
+  if (code.includes("D")) return "del";
+  if (code.includes("?") || code.includes("A")) return "add";
+  if (code.includes("M") || code.includes("R") || code.includes("U")) return "mod";
+  return null;
 }
 
 function Node({
@@ -70,12 +86,14 @@ function Node({
   version,
   onCreate,
   creating,
+  git,
 }: {
   entry: DirEntry;
   depth: number;
   version: number;
   onCreate: (c: { kind: "file" | "dir"; parent: string } | null) => void;
   creating: { kind: "file" | "dir"; parent: string } | null;
+  git: Map<string, string>;
 }) {
   const { openFile, activeTab, toast, set, treeVersion } = useApp();
   const [open, setOpen] = useState(false);
@@ -98,6 +116,7 @@ function Node({
       toast(errText(e), "error");
     }
   };
+  const tone = gitTone(git.get(entry.path));
 
   return (
     <>
@@ -135,7 +154,17 @@ function Node({
             onBlur={() => setRenaming(false)}
           />
         ) : (
-          <span className="truncate">{entry.name}</span>
+          <>
+            <span className="min-w-0 flex-1 truncate" style={{ color: tone === "add" ? "var(--ok)" : tone === "del" ? "var(--err)" : undefined }} data-git={tone ?? undefined}>
+              {entry.name}
+            </span>
+            {tone === "mod" && (
+              <span className="ml-auto shrink-0 font-code text-[10px]">
+                <span style={{ color: "var(--ok)" }}>+</span>
+                <span style={{ color: "var(--err)" }}>−</span>
+              </span>
+            )}
+          </>
         )}
       </div>
       {menu && (
@@ -161,7 +190,7 @@ function Node({
       {entry.kind === "dir" && open && (
         <>
           {creating && creating.parent === entry.path && <NewEntry kind={creating.kind} parent={entry.path} depth={depth + 1} done={() => onCreate(null)} />}
-          <Dir path={entry.path} depth={depth + 1} version={version} onCreate={onCreate} creating={creating} />
+          <Dir path={entry.path} depth={depth + 1} version={version} onCreate={onCreate} creating={creating} git={git} />
         </>
       )}
     </>

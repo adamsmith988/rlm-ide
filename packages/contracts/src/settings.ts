@@ -73,6 +73,28 @@ export const RlmSettings = z.object({
   sandboxNoNetwork: z.boolean().default(true),
 });
 
+/** A reusable instruction the user can insert with /name and that the agent sees while it is enabled. */
+export const SkillConfig = z.object({
+  id: z.string().min(1).max(80),
+  name: z.string().min(1).max(40).regex(/^[\w.-]+$/),
+  description: z.string().max(400).default(""),
+  body: z.string().max(20000).default(""),
+  enabled: z.boolean().default(true),
+});
+export type SkillConfig = z.infer<typeof SkillConfig>;
+
+/** A local MCP server the agent can call. The command is spawned directly, not through a shell. */
+export const McpServerConfig = z.object({
+  id: z.string().min(1).max(80),
+  name: z.string().min(1).max(60),
+  command: z.string().min(1).max(500),
+  args: z.string().max(2000).default(""),
+  /** KEY=VALUE lines. Stored in settings, so keep secrets out of here. */
+  env: z.string().max(8000).default(""),
+  enabled: z.boolean().default(true),
+});
+export type McpServerConfig = z.infer<typeof McpServerConfig>;
+
 export const MemorySettings = z.object({
   enabled: z.boolean().default(true),
   chunkChars: z.number().int().min(200).default(1200),
@@ -218,6 +240,8 @@ export const Settings = z.object({
   compact: CompactSettings.default({}),
   rlm: RlmSettings.default({}),
   memory: MemorySettings.default({}),
+  skills: z.array(SkillConfig).default([]),
+  mcp: z.array(McpServerConfig).default([]),
   tools: ToolSettings.default({}),
   local: LocalInferenceSettings.default({}),
   hub: HubSettings.default({}),

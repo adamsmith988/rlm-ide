@@ -29,6 +29,7 @@ import {
 } from "@rlm/adapters";
 import { cpuThreads } from "@rlm/inference/src/cpu";
 import { BgeM3Embedder } from "@rlm/inference/src/embed_bge";
+import { McpHub } from "./mcp";
 
 interface ParentPort {
   on(ev: "message", cb: (e: { data: Record<string, unknown>; ports: MessagePortLike[] }) => void): void;
@@ -44,6 +45,7 @@ interface MessagePortLike {
 const parent = (process as unknown as { parentPort: ParentPort }).parentPort;
 const post = (m: unknown) => parent.postMessage(m);
 const log = new ConsoleLogger();
+const mcp = new McpHub((m) => log.info(m));
 
 let settings: Settings = Settings.parse({});
 let keys: Record<string, string> = {};
@@ -223,6 +225,10 @@ function init(i: Record<string, unknown>): void {
       searchSession: async (chatId, q, limit) => repo!.searchTurns(chatId, q, limit),
       checkPage: (args) => hostRequest("check-page", args as unknown as Record<string, unknown>) as never,
       browser: (op, args) => hostRequest(`browser:${op}`, args),
+      mcp: {
+        list: async () => mcp.status(),
+        call: (server, name, args) => mcp.call(server, name, args),
+      },
     }),
     ...boards.tools(),
   ]);
@@ -254,6 +260,7 @@ function init(i: Record<string, unknown>): void {
   });
   void orch.startScheduler();
   publishModel();
+  void mcp.sync(settings.mcp);
 }
 
 function boardView(b: TaskBoard) {
@@ -291,7 +298,8 @@ const methods: Record<string, Handler> = {
   "kernel:sandbox": () => kernels!.sandboxInfo(),
   "chat:list": () => orch!.listChats(),
   "chat:create": (a) => orch!.createChat(String(a.title ?? "New chat")),
-  "chat:rename": (a) => repo!.renameChat(String(a.chatId), String(a.title)),
+  "chat:rename": (a) => orch!.renameChat(String(a.chatId), String(a.title)),
+  "chat:export": (a) => orch!.exportChat(String(a.chatId)),
   "chat:delete": (a) => orch!.deleteChat(String(a.chatId)),
   "chat:messages": (a) => orch!.messages(String(a.chatId)),
   "chat:send": (a) =>
@@ -339,8 +347,12 @@ const methods: Record<string, Handler> = {
   "memory:update": (a) => orch!.memory.updateFact(String(a.id), String(a.text), factScope(), settings.memory),
   "memory:delete": (a) => memoryStore!.delete([String(a.id)], factScope()),
   "memory:forgetAll": async () => {
-    await memoryStore!.deleteAll({ ...scope(), memory_type: "long_term" });
-    await memoryStore!.deleteAll({ ...scope(), memory_type: "short_term" });
+    const root = workspace!.root();
+    const user = scope();
+    if (!root) return false;
+    // Project facts and this project's chat memory only. Facts about the user stay, and other projects are untouched.
+    await memoryStore!.deleteAll({ ...user, memory_type: "long_term", workspace_id: root });
+    await memoryStore!.deleteAll({ ...user, memory_type: "short_term", workspace_id: root });
     return true;
   },
   "memory:export": async () =>
@@ -437,6 +449,7 @@ parent.on("message", (e) => {
         keys = (m.keys as Record<string, string>) ?? keys;
         router?.invalidate();
         publishModel();
+        void mcp.sync(settings.mcp);
         break;
       case "host-response": {
         const p = hostPending.get(m.id as number);

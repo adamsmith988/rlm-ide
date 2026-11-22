@@ -4,10 +4,10 @@ import { call } from "../../api";
 import { selectAgentModel } from "../../models";
 import type { UiMessage } from "../../chat/model";
 import { useApp } from "../../store";
-import { ICopy, IDown, IPlus, IUp } from "../../ui/icons";
+import { ICopy, IDown, IDownload, IPlus, IUp } from "../../ui/icons";
 import { PersonHeadphones } from "../../ui/LineArt";
 import { Markdown } from "../../ui/Markdown";
-import { BlockView, groupBlocks } from "./Blocks";
+import { BlockView, presentBlocks, SubAgent } from "./Blocks";
 import { Composer } from "./Composer";
 import { ContextMeter } from "./ContextMeter";
 import { PinnedCard } from "./PinnedCard";
@@ -48,6 +48,23 @@ export function AgentPanel() {
   }, [running, chatId]);
 
   const chatModels = settings ? agentPickerModels(settings) : [];
+  const subs = messages.flatMap((m) => m.blocks.filter((b) => b.kind === "subagent"));
+  const [subId, setSubId] = useState<string | null>(null);
+  const openSub = subs.find((s) => s.agentId === subId) ?? null;
+  const saveChat = async (kind: "md" | "json") => {
+    if (!chatId) return;
+    try {
+      const r = await call<{ title: string; markdown: string; backup: string }>("chat:export", { chatId });
+      const blob = new Blob([kind === "md" ? r.markdown : r.backup], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${r.title.replace(/[^\w.-]+/g, "_") || "chat"}.${kind === "md" ? "md" : "json"}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      useApp.getState().toast(String(e), "error");
+    }
+  };
   return (
     <section className="flex h-full flex-col border-l border-line bg-bg">
       <div className="flex h-10 shrink-0 items-center gap-2 px-3">
@@ -64,10 +81,31 @@ export function AgentPanel() {
             </option>
           ))}
         </select>
+        <button className="iconbtn" title="Export this chat as Markdown" disabled={!chatId} onClick={() => void saveChat("md")}>
+          <IDownload size={14} />
+        </button>
+        <button className="iconbtn" title="Backup this chat as JSON" disabled={!chatId} onClick={() => void saveChat("json")}>
+          <ICopy size={14} />
+        </button>
         <button className="iconbtn" title="New chat (Ctrl+Shift+N)" onClick={() => void newChat()}>
           <IPlus size={15} />
         </button>
       </div>
+      {subs.length > 0 && (
+        <div className="flex shrink-0 items-center gap-1 overflow-x-auto px-3 pb-1" data-testid="subchats">
+          <span className="smallcaps shrink-0">Sub-agents</span>
+          {subs.map((s) => (
+            <button
+              key={s.agentId}
+              className="shrink-0 rounded-full border px-2 py-[1px] text-[11px]"
+              style={{ borderColor: subId === s.agentId ? "var(--text)" : "var(--border)", color: s.done ? "var(--text-dim)" : "var(--text)" }}
+              onClick={() => setSubId(subId === s.agentId ? null : s.agentId)}
+            >
+              {s.done ? (s.ok ? "done" : "failed") : "running"} · {s.task.slice(0, 28)}
+            </button>
+          ))}
+        </div>
+      )}
       {chatId && <PinnedCard chatId={chatId} version={doneCount} />}
       {chatId && <TaskCard chatId={chatId} />}
       <div
@@ -81,13 +119,14 @@ export function AgentPanel() {
         {messages.length === 0 ? (
           <Empty disabled={!workspace} />
         ) : (
-          messages.map((m) => (m.role === "user" ? <UserMsg key={m.id} m={m} /> : <AssistantMsg key={m.id} m={m} />))
+          messages.map((m) => (m.role === "user" ? <UserMsg key={m.id} m={m} /> : <AssistantMsg key={m.id} m={m} onOpenSub={setSubId} />))
         )}
       </div>
       <div className="shrink-0 px-3 pb-3">
         <div className="mb-2.5">
           <ContextMeter usage={chatId ? context[chatId] : undefined} contextLength={status.contextLength} />
         </div>
+        {openSub && <SubComposer agent={openSub} disabled={!workspace || running} />}
         <Composer running={running} disabledReason={workspace ? null : "Open a folder to start"} />
       </div>
     </section>
@@ -114,9 +153,10 @@ function Empty({ disabled }: { disabled: boolean }) {
   );
 }
 
-const ATTACHED_RE = /\n\n(\*\*(?:Browser screenshot|Referenced element)\*\*[\s\S]*)$/;
+const ATTACHED_RE = /\n\n(\*\*(?:Browser screenshot|Referenced element|Attached image|Attached file)\*\*[\s\S]*)$/;
 
 function UserMsg({ m }: { m: UiMessage }) {
+  const toast = useApp((s) => s.toast);
   if (m.origin === "wakeup") {
     const note = /Your note for this wake-up: (.*)/.exec(m.text)?.[1] ?? "";
     return (
@@ -132,7 +172,19 @@ function UserMsg({ m }: { m: UiMessage }) {
   const typed = split ? m.text.slice(0, split.index) : m.text;
   return (
     <div className="mt-4 flex flex-col items-end gap-1.5 fade-in">
-      <div className="selectable max-w-[88%] whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[13px] text-bg">{typed}</div>
+      <div className="group relative max-w-[88%]">
+        <div className="selectable whitespace-pre-wrap rounded-[18px] rounded-br-[6px] bg-ink px-4 py-2.5 text-[13px] text-bg">{typed}</div>
+        <button
+          className="iconbtn absolute -left-7 top-1 h-6 w-6 opacity-0 group-hover:opacity-100"
+          title="Copy message"
+          onClick={() => {
+            void navigator.clipboard.writeText(m.text);
+            toast("Copied");
+          }}
+        >
+          <ICopy size={12} />
+        </button>
+      </div>
       {split && (
         <div className="max-w-[88%] rounded-[14px] border-[1.5px] border-ink bg-surface px-3 py-2 text-[12px]" data-testid="user-attachments">
           <Markdown text={split[1]!} previews={false} />
@@ -194,7 +246,7 @@ function LiveActivity({ m }: { m: UiMessage }) {
   );
 }
 
-function AssistantMsg({ m }: { m: UiMessage }) {
+function AssistantMsg({ m, onOpenSub }: { m: UiMessage; onOpenSub: (id: string) => void }) {
   const toast = useApp((s) => s.toast);
   const [fb, setFb] = useState(m.feedback ?? null);
   const running = m.status === "running";
@@ -205,12 +257,16 @@ function AssistantMsg({ m }: { m: UiMessage }) {
     await call("chat:feedback", { messageId: m.id, value: next ?? "none" }).catch(() => undefined);
   };
   const hasText = m.blocks.some((b) => b.kind === "text");
-  const grouped = useMemo(() => groupBlocks(m.blocks), [m.blocks]);
+  const { main, byAgent } = useMemo(() => presentBlocks(m.blocks), [m.blocks]);
   return (
     <div className="mt-4 flex flex-col gap-2 fade-in">
-      {grouped.map((b, i) => (
-        <BlockView key={i} block={b} running={running} last={i === grouped.length - 1} />
-      ))}
+      {main.map((b, i) =>
+        b.kind === "subagent" ? (
+          <SubAgent key={b.agentId} b={b} work={byAgent.get(b.agentId)} onChat={() => onOpenSub(b.agentId)} />
+        ) : (
+          <BlockView key={i} block={b} running={running} last={i === main.length - 1} />
+        ),
+      )}
       {running && <LiveActivity m={m} />}
       {!running && !hasText && m.text && <Markdown text={m.text} />}
       {m.status === "cancelled" && <div className="text-[11.5px] text-faint">Stopped.</div>}
@@ -238,6 +294,46 @@ function AssistantMsg({ m }: { m: UiMessage }) {
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+function SubComposer({ agent, disabled }: { agent: Extract<UiMessage["blocks"][number], { kind: "subagent" }>; disabled: boolean }) {
+  const send = useApp((s) => s.sendMessage);
+  const [text, setText] = useState("");
+  const submit = () => {
+    const t = text.trim();
+    if (!t || disabled) return;
+    setText("");
+    void send(
+      `Continue with the sub-agent and finish its task. Do not start a different job.\n\nSub-agent task:\n${agent.task}\n\n${agent.result ? `What it has done so far:\n${agent.result}\n\n` : ""}The user says:\n${t}`,
+      [],
+    );
+  };
+  return (
+    <div className="mb-2 rounded-[14px] border border-line bg-surface p-2" data-testid="subchat">
+      <div className="mb-1 flex items-center gap-2 px-1 text-[11px] text-dim">
+        <span className="font-semibold text-ink">Sub-chat</span>
+        <span className="min-w-0 flex-1 truncate">{agent.task}</span>
+        <span>{agent.done ? (agent.ok ? "finished" : "failed") : "running"}</span>
+      </div>
+      <div className="flex gap-2">
+        <input
+          id={`subchat-${agent.agentId}`}
+          autoFocus
+          className="input h-[32px] flex-1 text-[12.5px]"
+          placeholder={disabled ? "Wait for the current turn to finish" : "Message this sub-agent"}
+          disabled={disabled}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+          }}
+        />
+        <button className="btn btn-sm btn-primary" disabled={disabled || !text.trim()} onClick={submit}>
+          Send
+        </button>
+      </div>
     </div>
   );
 }

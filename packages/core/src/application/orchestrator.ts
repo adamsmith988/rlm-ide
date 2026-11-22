@@ -124,7 +124,22 @@ export class Orchestrator {
     await this.engine.shutdownIdleKernels((chatId) => this.runner.isActive(chatId));
   }
 
+  /** Refuses a chat that belongs to a different project folder. */
+  private async requireChat(chatId: string): Promise<ChatSummary> {
+    const chat = await this.d.conversations.getChat(chatId);
+    if (!chat) throw new Error("chat not found");
+    const root = this.d.workspace.root();
+    if (chat.workspaceId && root && chat.workspaceId !== root) throw new Error(`That chat belongs to another project (${chat.workspaceId}). Open that folder to use it.`);
+    return chat;
+  }
+
+  async renameChat(chatId: string, title: string): Promise<void> {
+    await this.requireChat(chatId);
+    await this.d.conversations.renameChat(chatId, title);
+  }
+
   async deleteChat(chatId: string): Promise<void> {
+    await this.requireChat(chatId);
     this.disarm(chatId);
     await this.d.boards?.drop(chatId);
     await this.engine.dropChat(chatId);
@@ -133,6 +148,7 @@ export class Orchestrator {
   }
 
   async messages(chatId: string): Promise<StoredMessage[]> {
+    await this.requireChat(chatId);
     const turns = await this.d.conversations.getTurns(chatId);
     const out: StoredMessage[] = [];
     for (const t of turns) {
@@ -141,6 +157,24 @@ export class Orchestrator {
       out.push({ id: `${t.id}:a`, chatId, turnId: t.id, role: "assistant", text: t.assistantText, createdAt: t.createdAt, status: t.status, events, feedback: t.meta.feedback ?? null });
     }
     return out;
+  }
+
+  /** A markdown transcript and a JSON backup. Both stay inside the open project. */
+  async exportChat(chatId: string): Promise<{ title: string; markdown: string; backup: string }> {
+    const chat = await this.requireChat(chatId);
+    const msgs = await this.messages(chatId);
+    const lines = [`# ${chat.title}`, "", `Project: ${chat.workspaceId ?? "(no folder)"}`, ""];
+    for (const m of msgs) {
+      lines.push(`## ${m.role === "user" ? "You" : "Agent"}`, "", m.text || "(no text)", "");
+    }
+    const backup = {
+      id: chat.id,
+      title: chat.title,
+      workspaceId: chat.workspaceId,
+      exportedAt: this.d.clock.now(),
+      messages: msgs.map((m) => ({ role: m.role, text: m.text, status: m.status, createdAt: m.createdAt })),
+    };
+    return { title: chat.title, markdown: lines.join("\n"), backup: JSON.stringify(backup, null, 2) };
   }
 
   async checkpoint(chatId: string): Promise<{ summary: string; throughIdx: number } | null> {
@@ -334,7 +368,7 @@ export class Orchestrator {
       const all = this.d.tools.list();
       const groups = args.toolGroups && args.toolGroups.length ? new Set(args.toolGroups) : null;
       const toolIds = new Set(all.filter((t) => !groups || groups.has(t.group)).map((t) => t.id));
-      const subagentToolIds = new Set(all.filter((t) => !t.sideEffects && t.group !== "task").map((t) => t.id));
+      const subagentToolIds = new Set(all.filter((t) => t.group !== "task").map((t) => t.id));
 
       // 5. engine
       const conversationText = () => [...verbatim.map((t) => `User: ${t.userText}\nAssistant: ${t.assistantText}`), `User: ${args.text}`].join("\n\n");
@@ -345,7 +379,17 @@ export class Orchestrator {
         userText,
         verbatim: comp.kept,
         checkpoint: comp.checkpoint,
-        blocks: { memory: recall.block, pinned, editor, clock: new Date(this.d.clock.now()).toString(), persona: s.persona },
+        blocks: {
+          memory: recall.block,
+          pinned,
+          editor,
+          clock: new Date(this.d.clock.now()).toString(),
+          persona: s.persona,
+          skills: s.skills
+            .filter((sk) => sk.enabled && sk.body.trim())
+            .map((sk) => `### /${sk.name}\n${sk.description}\n${sk.body}`)
+            .join("\n\n"),
+        },
         limits: modelLimits,
         rlm: s.rlm,
         compact: s.compact,

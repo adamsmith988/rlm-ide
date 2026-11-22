@@ -42,10 +42,11 @@ export type TurnEventBody =
   | { type: "tool_call"; call: ToolCallInfo; agentPath: string[] }
   | { type: "tool_result"; callId: string; ok: boolean; result: unknown; durationMs: number; deduped?: boolean }
   | { type: "approval_request"; approvalId: string; call: ToolCallInfo; preview?: string }
-  | { type: "approval_resolved"; approvalId: string; approved: boolean }
+  | { type: "approval_resolved"; approvalId: string; approved: boolean; skipped?: boolean }
   | { type: "compaction"; checkpoint: CheckpointInfo }
   | { type: "memory_recalled"; items: RecalledMemory[]; offline: boolean }
   | { type: "subagent_started"; agentId: string; parentPath: string[]; task: string }
+  | { type: "subagent_delta"; agentId: string; text: string }
   | { type: "subagent_done"; agentId: string; ok: boolean; result: string }
   /** All in prompt tokens of the next model call: the whole prompt, where compaction fires, the largest prompt that still leaves room to answer, and the window. */
   | { type: "context_usage"; usedTokens: number; triggerTokens: number; inputLimit: number; contextLength: number }

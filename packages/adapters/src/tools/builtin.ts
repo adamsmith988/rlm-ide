@@ -21,6 +21,11 @@ export interface ToolHostServices {
   checkPage?: (args: { path: string; waitMs: number; clicks: string[] }) => Promise<Record<string, unknown>>;
   /** Drives the IDE's visible built-in browser (desktop host only). */
   browser?: (op: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** Local MCP servers configured in Settings. */
+  mcp?: {
+    list: () => Promise<unknown>;
+    call: (server: string, name: string, args: Record<string, unknown>) => Promise<unknown>;
+  };
 }
 
 const s = (description: string, extra: Record<string, unknown> = {}) => ({ type: "string" as const, description, ...extra });
@@ -521,6 +526,42 @@ export function createBuiltinTools(svc: ToolHostServices): ToolImpl[] {
     ),
     ...(svc.checkPage ? [webCheck(svc.checkPage)] : []),
     ...(svc.browser ? browserTools(svc.browser) : []),
+    ...(svc.mcp ? mcpTools(svc.mcp) : []),
+  ];
+}
+
+function mcpTools(mcp: NonNullable<ToolHostServices["mcp"]>): ToolImpl[] {
+  return [
+    tool(
+      {
+        id: "mcp.list",
+        group: "mcp",
+        description: "List the MCP servers configured in Settings and the tools each one exposes.",
+        parameters: { type: "object", properties: {} },
+        returns: "list[dict(name, error, tools)]",
+        sideEffects: false,
+      },
+      () => mcp.list(),
+    ),
+    tool(
+      {
+        id: "mcp.call",
+        group: "mcp",
+        description: "Call a tool on a configured MCP server. Use mcp.list() for server and tool names. arguments is a dict of that tool's parameters.",
+        parameters: {
+          type: "object",
+          properties: {
+            server: s("Server name from Settings"),
+            name: s("Tool name"),
+            arguments: { type: "object", description: "Arguments for the tool" },
+          },
+          required: ["server", "name"],
+        },
+        returns: "text",
+        sideEffects: true,
+      },
+      (a) => mcp.call(String(a.server), String(a.name), (a.arguments as Record<string, unknown>) ?? {}),
+    ),
   ];
 }
 

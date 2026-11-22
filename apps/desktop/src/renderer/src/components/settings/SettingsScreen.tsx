@@ -13,6 +13,7 @@ const CATEGORIES = [
   ["agent", "Agent & compaction"],
   ["local", "Local inference"],
   ["appearance", "Appearance"],
+  ["skills", "Skills & MCP"],
   ["about", "About"],
 ] as const;
 type Cat = (typeof CATEGORIES)[number][0];
@@ -28,7 +29,7 @@ export function SettingsScreen() {
         <div className="relative mx-auto max-w-[920px] px-10 pb-6 pt-10">
           <div className="smallcaps">Preferences</div>
           <h1 className="heading m-0 mt-1 text-[44px] leading-none">Settings</h1>
-          <div className="mt-6 grid grid-cols-4 gap-2.5 lg:grid-cols-7">
+          <div className="mt-6 grid grid-cols-4 gap-2.5 lg:grid-cols-8">
             {CATEGORIES.map(([id, label]) => (
               <button key={id} className={`tile ${cat === id ? "on" : ""}`} onClick={() => setCat(id)}>
                 {label}
@@ -44,6 +45,7 @@ export function SettingsScreen() {
         {cat === "agent" && <AgentSection s={s} />}
         {cat === "local" && <LocalSection s={s} />}
         {cat === "appearance" && <AppearanceSection s={s} />}
+        {cat === "skills" && <SkillsMcpSection s={s} />}
         {cat === "about" && <AboutSection s={s} />}
       </div>
     </div>
@@ -82,7 +84,87 @@ function MemorySection({ s }: { s: Settings }) {
       <Row label="Duplicate threshold" hint="New facts this similar to an existing one update it instead.">
         <Ratio value={m.factDedupScore} onChange={(v) => set({ factDedupScore: v })} />
       </Row>
+      <Row label="Always recall" hint="When you have at most this many facts, all of them are included.">
+        <Num value={m.alwaysRecallFacts} min={0} max={50} onChange={(v) => set({ alwaysRecallFacts: v ?? 0 })} />
+      </Row>
+      <Row label="New facts per turn" hint="How many facts one exchange can add.">
+        <Num value={m.factMaxAddsPerTurn} min={0} max={20} onChange={(v) => set({ factMaxAddsPerTurn: v ?? 0 })} />
+      </Row>
+      <Row label="Fact length" hint="Longer text is treated as pasted content, not a fact.">
+        <Num value={m.factMaxChars} min={40} max={2000} onChange={(v) => set({ factMaxChars: v ?? 200 })} suffix="chars" />
+      </Row>
+      <Row label="Skip short messages" hint="Messages shorter than this are not distilled into facts.">
+        <Num value={m.factMinUserChars} min={0} max={200} onChange={(v) => set({ factMinUserChars: v ?? 0 })} suffix="chars" />
+      </Row>
+      <Row label="Recent turns kept" hint="How many recent exchanges stay in the prompt before older ones are recalled from memory.">
+        <Num value={m.historyKeep} min={0} max={50} onChange={(v) => set({ historyKeep: v ?? 0 })} />
+      </Row>
+      <Row label="Memory in the prompt" hint="Character budget for recalled facts and chat excerpts.">
+        <Num value={m.promptMaxChars} min={200} max={20000} onChange={(v) => set({ promptMaxChars: v ?? 4000 })} suffix="chars" />
+      </Row>
+      <div className="mt-3 text-[12px] leading-relaxed text-dim">
+        Each project keeps its own chats and project facts. Facts about you (not tied to a folder) follow you into every project. Opening another folder does not load the previous project's chats.
+      </div>
     </Section>
+  );
+}
+
+function SkillsMcpSection({ s }: { s: Settings }) {
+  const patch = usePatch();
+  const skills = s.skills;
+  const mcp = s.mcp;
+  const setSkill = (id: string, p: Partial<(typeof skills)[number]>) => patch({ skills: skills.map((x) => (x.id === id ? { ...x, ...p } : x)) });
+  return (
+    <>
+      <Section title="Skills" hint="Enabled skills are in the agent's instructions. Type /name in the chat to insert one. Names are letters, numbers, dots, and dashes.">
+        {skills.map((sk) => (
+          <div key={sk.id} className="mb-3 rounded-[12px] border border-line p-3" data-testid="skill-editor">
+            <div className="mb-2 flex items-center gap-2">
+              <Text value={sk.name} width={180} mono onChange={(v) => setSkill(sk.id, { name: v.trim().replace(/[^\w.-]/g, "").slice(0, 40) || sk.name })} />
+              <Text value={sk.description} width={280} placeholder="What this skill is for" onChange={(v) => setSkill(sk.id, { description: v })} />
+              <Toggle value={sk.enabled} onChange={(v) => setSkill(sk.id, { enabled: v })} />
+              <button className="btn btn-sm btn-danger ml-auto" onClick={() => patch({ skills: skills.filter((x) => x.id !== sk.id) })}>
+                Remove
+              </button>
+            </div>
+            <textarea className="input min-h-[88px] w-full p-2 font-code text-[12px]" value={sk.body} placeholder="Instructions inserted when the user types /name" onChange={(e) => setSkill(sk.id, { body: e.target.value })} />
+          </div>
+        ))}
+        <button
+          className="btn btn-sm"
+          onClick={() => patch({ skills: [...skills, { id: crypto.randomUUID(), name: `skill-${skills.length + 1}`, description: "", body: "", enabled: true }] })}
+        >
+          Add skill
+        </button>
+      </Section>
+      <Section title="MCP servers" hint="Each server is a local command (not a shell). The agent uses mcp.list and mcp.call. Do not put secrets in the environment box; it is saved in settings.">
+        {mcp.map((sv) => (
+          <div key={sv.id} className="mb-3 rounded-[12px] border border-line p-3" data-testid="mcp-editor">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Text value={sv.name} width={160} placeholder="Name" onChange={(v) => patch({ mcp: mcp.map((x) => (x.id === sv.id ? { ...x, name: v } : x)) })} />
+              <Text value={sv.command} width={220} mono placeholder="npx" onChange={(v) => patch({ mcp: mcp.map((x) => (x.id === sv.id ? { ...x, command: v } : x)) })} />
+              <Toggle value={sv.enabled} onChange={(v) => patch({ mcp: mcp.map((x) => (x.id === sv.id ? { ...x, enabled: v } : x)) })} />
+              <button className="btn btn-sm btn-danger ml-auto" onClick={() => patch({ mcp: mcp.filter((x) => x.id !== sv.id) })}>
+                Remove
+              </button>
+            </div>
+            <Text value={sv.args} width={520} mono placeholder="Arguments, quoted when they contain spaces" onChange={(v) => patch({ mcp: mcp.map((x) => (x.id === sv.id ? { ...x, args: v } : x)) })} />
+            <textarea
+              className="input mt-2 min-h-[64px] w-full p-2 font-code text-[12px]"
+              value={sv.env}
+              placeholder={"KEY=value\n# no secrets"}
+              onChange={(e) => patch({ mcp: mcp.map((x) => (x.id === sv.id ? { ...x, env: e.target.value } : x)) })}
+            />
+          </div>
+        ))}
+        <button
+          className="btn btn-sm"
+          onClick={() => patch({ mcp: [...mcp, { id: crypto.randomUUID(), name: `server-${mcp.length + 1}`, command: "npx", args: "", env: "", enabled: false }] })}
+        >
+          Add MCP server
+        </button>
+      </Section>
+    </>
   );
 }
 

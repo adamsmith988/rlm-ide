@@ -293,8 +293,9 @@ export class RlmEngine {
     const child: Session = { chatId: `${parent.chatId}/${agentId}`, entries: [{ kind: "user", text: task, turnIdx: input.turnIdx }], kernel: null, lastTurnIdx: input.turnIdx, depth: parent.depth + 1 };
     try {
       const out = await this.loop(child, input, path, toolIds, children);
-      input.emit({ type: "subagent_done", agentId, ok: true, result: clipChars(out.finalText, 4000) });
-      return out.finalText;
+      const result = clipChars([out.finalText, out.workLog ? `Work:\n${out.workLog}` : ""].filter(Boolean).join("\n\n"), 8000);
+      input.emit({ type: "subagent_done", agentId, ok: true, result });
+      return result;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       input.emit({ type: "subagent_done", agentId, ok: false, result: msg });
@@ -397,6 +398,7 @@ export class RlmEngine {
             const visible = filter.push(c.text);
             phase = filter.draft() !== null ? "writing_code" : "writing";
             if (visible && isRoot) input.emit({ type: "text_delta", text: visible });
+            else if (visible && agentPath.length) input.emit({ type: "subagent_delta", agentId: agentPath[agentPath.length - 1]!, text: visible });
             progress();
             if ((cutBy = guard.push("text", c.text))) break;
           } else if (c.type === "usage") {

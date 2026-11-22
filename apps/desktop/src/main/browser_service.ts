@@ -115,14 +115,43 @@ window.__rlm = window.__rlm || (() => {
 const WORLD = 1077;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+interface PageTab {
+  id: string;
+  view: WebContentsView;
+  console: Array<{ level: string; text: string }>;
+}
+
 /** The in-app browser: a WebContentsView laid over the panel area the renderer reserves for it. */
 export class BrowserService {
-  private view: WebContentsView | null = null;
+  private tabs: PageTab[] = [];
+  private activeId: string | null = null;
+  private tabSeq = 0;
   private devView: WebContentsView | null = null;
   private bounds: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   private visible = false;
-  private console: Array<{ level: string; text: string }> = [];
-  private st: BrowserState = { open: false, url: "", title: "", loading: false, canGoBack: false, canGoForward: false, devtools: false, picking: false, agent: null, error: null };
+  private st: BrowserState = {
+    open: false,
+    url: "",
+    title: "",
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+    devtools: false,
+    picking: false,
+    agent: null,
+    error: null,
+    tabs: [],
+    activeId: null,
+    console: [],
+  };
+
+  private get view(): WebContentsView | null {
+    return this.tabs.find((t) => t.id === this.activeId)?.view ?? null;
+  }
+
+  private get console(): Array<{ level: string; text: string }> {
+    return this.tabs.find((t) => t.id === this.activeId)?.console ?? [];
+  }
 
   constructor(
     private win: () => BrowserWindow | null,
@@ -132,7 +161,16 @@ export class BrowserService {
   ) {}
 
   state(): BrowserState {
-    return { ...this.st };
+    return {
+      ...this.st,
+      tabs: this.tabs.map((t) => ({
+        id: t.id,
+        url: t.view.webContents.isDestroyed() ? "" : t.view.webContents.getURL(),
+        title: t.view.webContents.isDestroyed() ? "Tab" : t.view.webContents.getTitle() || "New tab",
+      })),
+      activeId: this.activeId,
+      console: this.console.slice(-200),
+    };
   }
 
   private update(p: Partial<BrowserState>): void {
@@ -147,8 +185,7 @@ export class BrowserService {
     this.emit(this.state());
   }
 
-  private ensure(): WebContentsView {
-    if (this.view && !this.view.webContents.isDestroyed()) return this.view;
+  private createTab(): PageTab {
     const ses = session.fromPartition(BROWSER_PARTITION);
     this.preview.registerOn(ses.protocol);
     ses.setPermissionRequestHandler((_wc, perm, cb) => cb(perm === "clipboard-sanitized-write" || perm === "fullscreen"));
@@ -156,36 +193,88 @@ export class BrowserService {
       webPreferences: { partition: BROWSER_PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, spellcheck: false },
     });
     view.setBackgroundColor("#ffffff");
+    const tab: PageTab = { id: `t${++this.tabSeq}`, view, console: [] };
     const wc = view.webContents;
     wc.setWindowOpenHandler(({ url }) => {
-      if (/^(https?|file|rlm-preview):/.test(url)) void this.navigate(url);
+      if (/^(https?|file|rlm-preview):/.test(url)) void this.openTab(url);
       return { action: "deny" };
     });
-    const refresh = () => this.update({});
-    wc.on("did-start-loading", () => this.update({ loading: true, error: null }));
+    const refresh = () => {
+      if (this.activeId === tab.id) this.update({});
+    };
+    wc.on("did-start-loading", () => {
+      if (this.activeId === tab.id) this.update({ loading: true, error: null });
+    });
     wc.on("did-stop-loading", refresh);
     wc.on("did-navigate", () => {
-      this.console = [];
+      tab.console.length = 0;
       refresh();
     });
     wc.on("did-navigate-in-page", refresh);
     wc.on("page-title-updated", refresh);
     wc.on("did-fail-load", (_e, code, desc, url, isMain) => {
-      if (isMain && code !== -3) this.update({ error: `${desc} (${code}) loading ${url}` });
+      if (isMain && code !== -3 && this.activeId === tab.id) this.update({ error: `${desc} (${code}) loading ${url}` });
     });
-    wc.on("devtools-closed", () => this.closeDevtoolsView());
+    wc.on("devtools-closed", () => {
+      if (this.activeId === tab.id) this.closeDevtoolsView();
+    });
     wc.on("console-message", (...a: unknown[]) => {
       const ev = a[0] as { level?: string | number; message?: string; lineNumber?: number; sourceId?: string };
       const level = String(ev.level ?? a[1] ?? "info");
       const message = ev.message ?? String(a[2] ?? "");
       if (/Electron Security Warning/.test(message)) return;
       const src = (ev.sourceId ?? String(a[4] ?? "")).split("/").pop();
-      this.console.push({ level: level === "3" ? "error" : level === "2" ? "warning" : level, text: `${message}${src ? ` (${src}:${ev.lineNumber ?? a[3]})` : ""}` });
-      if (this.console.length > 200) this.console.splice(0, this.console.length - 200);
+      tab.console.push({ level: level === "3" ? "error" : level === "2" ? "warning" : level, text: `${message}${src ? ` (${src}:${ev.lineNumber ?? a[3]})` : ""}` });
+      if (tab.console.length > 200) tab.console.splice(0, tab.console.length - 200);
+      if (this.activeId === tab.id) this.update({});
     });
-    wc.on("render-process-gone", (_e, d) => this.update({ error: `page crashed (${d.reason})` }));
-    this.view = view;
-    return view;
+    wc.on("render-process-gone", (_e, d) => {
+      if (this.activeId === tab.id) this.update({ error: `page crashed (${d.reason})` });
+    });
+    this.tabs.push(tab);
+    return tab;
+  }
+
+  private ensure(): WebContentsView {
+    if (this.view && !this.view.webContents.isDestroyed()) return this.view;
+    const tab = this.createTab();
+    this.activeId = tab.id;
+    return tab.view;
+  }
+
+  /** Opens a page in a new tab and selects it. */
+  openTab(url?: string): BrowserState {
+    if (this.devView) this.closeDevtoolsView();
+    const tab = this.createTab();
+    this.activeId = tab.id;
+    this.update({ open: true, error: null });
+    this.layout();
+    if (url) void this.navigate(url);
+    return this.state();
+  }
+
+  selectTab(id: string): BrowserState {
+    if (!this.tabs.some((t) => t.id === id)) return this.state();
+    if (this.devView) this.closeDevtoolsView();
+    this.activeId = id;
+    this.update({ open: true, error: null });
+    this.layout();
+    return this.state();
+  }
+
+  closeTab(id: string): BrowserState {
+    const i = this.tabs.findIndex((t) => t.id === id);
+    if (i < 0) return this.state();
+    const tab = this.tabs[i]!;
+    if (this.devView && this.activeId === id) this.closeDevtoolsView();
+    this.tabs.splice(i, 1);
+    const win = this.win();
+    if (win && win.contentView.children.includes(tab.view)) win.contentView.removeChildView(tab.view);
+    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+    if (this.activeId === id) this.activeId = this.tabs[Math.min(i, this.tabs.length - 1)]?.id ?? null;
+    this.update({ open: this.tabs.length > 0 });
+    this.layout();
+    return this.state();
   }
 
   /** Accepts URLs, workspace-relative paths, host names and search words. */
@@ -240,16 +329,21 @@ export class BrowserService {
 
   private layout(): void {
     const win = this.win();
-    if (!win || !this.view) return;
-    const show = this.visible && this.st.open && this.bounds.width > 20 && this.bounds.height > 20;
+    if (!win) return;
+    const show = this.visible && this.st.open && this.bounds.width > 20 && this.bounds.height > 20 && !!this.view;
     const children = win.contentView.children;
-    for (const v of [this.view, this.devView]) {
-      if (!v) continue;
-      const attached = children.includes(v);
-      if (show && !attached) win.contentView.addChildView(v);
-      if (!show && attached) win.contentView.removeChildView(v);
+    for (const t of this.tabs) {
+      const on = show && t.id === this.activeId;
+      const attached = children.includes(t.view);
+      if (on && !attached) win.contentView.addChildView(t.view);
+      if (!on && attached) win.contentView.removeChildView(t.view);
     }
-    if (!show) return;
+    if (this.devView) {
+      const attached = children.includes(this.devView);
+      if (show && !attached) win.contentView.addChildView(this.devView);
+      if (!show && attached) win.contentView.removeChildView(this.devView);
+    }
+    if (!show || !this.view) return;
     const { x, y, width, height } = this.bounds;
     if (this.devView) {
       const pageH = Math.round(height * 0.55);

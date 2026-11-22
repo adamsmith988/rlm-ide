@@ -271,6 +271,7 @@ const ORCH_CHANNELS = new Set<IpcChannel>([
   "chat:rename",
   "chat:delete",
   "chat:messages",
+  "chat:export",
   "chat:send",
   "chat:stop",
   "chat:subscribe",
@@ -529,6 +530,42 @@ async function handle(channel: IpcChannel, payload: Record<string, unknown>): Pr
       return browser.screenshot();
     case "browser:pick":
       return browser.pickElement();
+    case "dialog:openFiles": {
+      const images = payload.images === true;
+      const r = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, {
+            title: String(payload.title ?? "Attach files"),
+            properties: ["openFile", "multiSelections"],
+            filters: images ? [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }] : undefined,
+          })
+        : { canceled: true, filePaths: [] as string[] };
+      if (r.canceled) return [];
+      const out: Array<{ kind: "image" | "file"; name: string; path: string; image?: string; text?: string }> = [];
+      for (const file of r.filePaths.slice(0, 8)) {
+        const st = statSync(file);
+        if (!st.isFile() || st.size > 8_000_000) continue;
+        const name = path.basename(file);
+        const image = images || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+        if (image) {
+          const ext = path.extname(name).slice(1).toLowerCase().replace("jpg", "jpeg");
+          out.push({ kind: "image", name, path: file, image: `data:image/${ext};base64,${readFileSync(file).toString("base64")}` });
+        } else {
+          const buf = readFileSync(file);
+          out.push({ kind: "file", name, path: file, text: buf.includes(0) ? "(binary file, not inlined)" : buf.toString("utf8").slice(0, 80_000) });
+        }
+      }
+      return out;
+    }
+    case "browser:tab": {
+      const action = String(payload.action);
+      const id = payload.id ? String(payload.id) : "";
+      if (action === "new") return browser.openTab(payload.url ? String(payload.url) : undefined);
+      if (action === "select" && id) return browser.selectTab(id);
+      if (action === "close" && id) return browser.closeTab(id);
+      return browser.state();
+    }
+    case "browser:console":
+      return browser.state().console;
     case "browser:command": {
       const cmd = String(payload.cmd);
       if (cmd === "back") browser.back();

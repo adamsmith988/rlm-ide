@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { BrowserElementRef, BrowserScreenshot, BrowserState } from "@rlm/contracts";
 import { api, call, errText } from "../api";
 import { useApp } from "../store";
-import { IBack, ICamera, IClose, IExternal, IForward, IGlobe, IInspect, IPick, IRefresh, IStop } from "../ui/icons";
+import { IBack, ICamera, IClose, ICopy, IExternal, IForward, IGlobe, IInspect, IPick, IPlus, IRefresh, IStop } from "../ui/icons";
 
 let attachSeq = 0;
 
@@ -12,6 +12,7 @@ export function BrowserPanel() {
   const overlay = useApp((s) => !!s.palette);
   const { set, toast, attach, workspace } = useApp();
   const [input, setInput] = useState(st.url);
+  const [consoleOpen, setConsoleOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const host = useRef<HTMLDivElement>(null);
 
@@ -68,8 +69,39 @@ export function BrowserPanel() {
     }
   };
 
+  const tab = (action: "new" | "close" | "select", id?: string) => void call("browser:tab", { action, id }).catch((e) => toast(errText(e), "error"));
+  const copyConsole = () => {
+    const text = st.console.map((l) => `${l.level}: ${l.text}`).join("\n");
+    void navigator.clipboard.writeText(text);
+    toast(text ? "Console copied" : "Console is empty");
+  };
+
   return (
     <section className="flex h-full flex-col border-l border-line bg-bg" data-testid="browser-panel">
+      <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-2" data-testid="browser-tabs">
+        {st.tabs.map((t) => (
+          <button
+            key={t.id}
+            className="group flex max-w-[160px] items-center gap-1 rounded-full px-2 py-[2px] text-[11px]"
+            style={{ background: t.id === st.activeId ? "var(--surface-2)" : "transparent", color: t.id === st.activeId ? "var(--text)" : "var(--text-dim)" }}
+            onClick={() => tab("select", t.id)}
+          >
+            <span className="truncate">{t.title || "New tab"}</span>
+            <span
+              className="iconbtn h-4 w-4 opacity-0 group-hover:opacity-100"
+              onClick={(e) => {
+                e.stopPropagation();
+                tab("close", t.id);
+              }}
+            >
+              <IClose size={10} />
+            </span>
+          </button>
+        ))}
+        <button className="iconbtn h-6 w-6" title="New tab" onClick={() => tab("new")} data-testid="browser-new-tab">
+          <IPlus size={13} />
+        </button>
+      </div>
       <div className="flex h-10 shrink-0 items-center gap-1 px-2">
         <button className="iconbtn" title="Back" disabled={!st.canGoBack} style={{ opacity: st.canGoBack ? 1 : 0.35 }} onClick={() => cmd("back")}>
           <IBack size={15} />
@@ -120,6 +152,9 @@ export function BrowserPanel() {
         >
           <IPick size={15} />
         </button>
+        <button className="iconbtn" title="Page console" disabled={!st.open} style={consoleOpen ? { background: "var(--text)", color: "var(--bg)" } : undefined} onClick={() => setConsoleOpen((v) => !v)} data-testid="browser-console-toggle">
+          <span className="font-code text-[11px]">{"{}"}</span>
+        </button>
         <button className="iconbtn" title="Inspect (DevTools)" disabled={!st.open} style={st.devtools ? { background: "var(--text)", color: "var(--bg)" } : undefined} onClick={() => cmd("devtools")}>
           <IInspect size={15} />
         </button>
@@ -158,6 +193,20 @@ export function BrowserPanel() {
       <div ref={host} className="relative min-h-0 flex-1 bg-surface">
         {!st.open && <StartPage onGo={go} hasWorkspace={!!workspace} />}
       </div>
+      {consoleOpen && (
+        <div className="flex h-[160px] shrink-0 flex-col border-t border-line" data-testid="browser-console">
+          <div className="flex items-center gap-2 px-2 py-1 text-[11px] text-dim">
+            <span className="font-semibold uppercase tracking-[0.08em]">Console</span>
+            <span className="text-faint">{st.console.length}</span>
+            <button className="iconbtn ml-auto h-6 w-6" title="Copy console" onClick={copyConsole}>
+              <ICopy size={12} />
+            </button>
+          </div>
+          <pre className="selectable min-h-0 flex-1 overflow-auto px-3 pb-2 font-code text-[11px] leading-[1.4] text-dim">
+            {st.console.length ? st.console.map((l) => `${l.level}: ${l.text}`).join("\n") : "No console messages on this tab."}
+          </pre>
+        </div>
+      )}
     </section>
   );
 }
